@@ -3,6 +3,7 @@
 `adgroups2cmdbuild` synchronizes selected Microsoft Active Directory groups into CMDBuild roles.
 
 Architecture artifacts are stored in [aa/](aa/README.md).
+Russian deployment instructions are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 Behavior:
 - every configured AD group is expected to have the same name as a CMDBuild role;
