@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+.idea/
+.dotnet/
+.dotnet_home/
+.nuget/
+state/
+appsettings.Production.json
+*.user

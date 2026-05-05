@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.git/
+.idea/
+.dotnet/
+.dotnet_home/
+.nuget/
+state/
+reports/

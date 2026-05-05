@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -x "$repo_root/.dotnet/dotnet" ]]; then
+  export DOTNET_ROOT="$repo_root/.dotnet"
+  export DOTNET_CLI_HOME="${DOTNET_CLI_HOME:-$repo_root/.dotnet_home}"
+  export DOTNET_NOLOGO=1
+  export DOTNET_CLI_TELEMETRY_OPTOUT=1
+  exec "$repo_root/.dotnet/dotnet" "$@"
+fi
+
+if command -v dotnet >/dev/null 2>&1; then
+  exec dotnet "$@"
+fi
+
+fallback_root="/home/lsk/projects/cmdb2monitoring/.dotnet"
+if [[ -x "$fallback_root/dotnet" ]]; then
+  export DOTNET_ROOT="$fallback_root"
+  export DOTNET_CLI_HOME="${DOTNET_CLI_HOME:-$repo_root/.dotnet_home}"
+  export DOTNET_NOLOGO=1
+  export DOTNET_CLI_TELEMETRY_OPTOUT=1
+  exec "$fallback_root/dotnet" "$@"
+fi
+
+echo "dotnet SDK was not found. Install .NET 10 SDK or place it in $repo_root/.dotnet." >&2
+exit 127

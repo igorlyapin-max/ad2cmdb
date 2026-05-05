@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>bootstrap-ad-groups</AssemblyName>
+    <RootNamespace>BootstrapAdGroups</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.DirectoryServices.Protocols" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/adgroups2cmdbuild/Secrets/*.cs" Link="Secrets/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>
