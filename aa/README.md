@@ -14,6 +14,7 @@
 | [information-model.md](information-model.md) | Информационные сущности, ключи и правила владения данными |
 | [maps/access-map.md](maps/access-map.md) | Внешние подключения и минимальные права |
 | [maps/healthcheck-map.md](maps/healthcheck-map.md) | Health/status endpoints и операционные проверки |
+| [maps/observability-map.md](maps/observability-map.md) | Console, ELK, Docker syslog и debug-level logging |
 | [maps/secrets-map.md](maps/secrets-map.md) | Секреты, PAM/AAPM ссылки и runtime-поля |
 
 ## Контекст
@@ -24,6 +25,7 @@ flowchart LR
     CMDB[(CMDBuild REST v3)]
     PAM[(Indeed PAM/AAPM)]
     ELK[(ELK / Elasticsearch)]
+    SYSLOG[(Syslog via Docker)]
     SVC[adgroups2cmdbuild]
     BOOT[bootstrap-ad-groups]
 
@@ -32,6 +34,7 @@ flowchart LR
     SVC -- read groups/users --> AD
     SVC -- create/update/disable users --> CMDB
     SVC -. optional logs .-> ELK
+    SVC -. stdout/stderr .-> SYSLOG
     BOOT -- read roles --> CMDB
     BOOT -- create missing groups --> AD
 ```

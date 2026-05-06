@@ -11,7 +11,7 @@
 - MS AD LDAP/LDAPS;
 - CMDBuild REST API v3;
 - optional PAM/AAPM для секретов;
-- optional ELK для логов.
+- optional ELK или platform logging для логов.
 
 Основной поток:
 
@@ -70,3 +70,21 @@
 - `--apply` без явного selection запрещен, кроме случая `BootstrapAdGroups:RequireExplicitSelectionForApply=false`;
 - существующие AD groups не пересоздаются и не изменяются;
 - членство пользователей не переносится, создаются только group objects.
+
+## BP-004. Диагностика и Логирование
+
+Цель: дать оператору достаточно данных для разбора sync-run без постоянного включения чрезмерной детализации.
+
+Режимы:
+
+- `Debug:Enabled=false`: только обычные информационные, warning и error logs.
+- `Debug:Enabled=true`, `Debug:Level=Basic`: счетчики и ключевые этапы sync-run.
+- `Debug:Enabled=true`, `Debug:Level=Verbose`: Basic плюс per-user действия и resolved login lists.
+
+Каналы:
+
+1. Console stdout/stderr всегда доступен.
+2. ELK используется только при заполненном `ElkLogging:Endpoint` и `ElkLogging:Enabled=true`.
+3. Syslog не встроен в код: Docker пересылает stdout/stderr через `--log-driver=syslog`.
+
+Ограничение: `Verbose` может раскрывать логины и состав групп, поэтому включается только на диагностическое окно.

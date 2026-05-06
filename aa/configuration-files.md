@@ -26,7 +26,7 @@
 | `ActiveDirectory` | LDAP/LDAPS endpoint, bind account, group search, user attributes |
 | `Cmdbuild` | CMDBuild REST v3 URL, service account, user fields, role name fields |
 | `Sync` | Периодичность, dry-run, immediate start, state file |
-| `Debug` | Diagnostic logging flag and verbosity level `Basic`/`Verbose` |
+| `Debug` | Diagnostic logging flag and verbosity level `Basic`/`Verbose`; события пишутся через `ILogger` на `Information` |
 | `ElkLogging` | Optional отправка structured logs в ELK |
 | `Logging` | Обычный .NET console logging |
 

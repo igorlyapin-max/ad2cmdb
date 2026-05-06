@@ -11,6 +11,7 @@
 | IM-005 | Sync state | Local FS | `ManagedLogins[]` | Память сервиса о ранее управляемых пользователях |
 | IM-006 | Secret reference | Config/PAM | `secret://id` или `aapm://id` | Ссылка на секрет без хранения значения в git |
 | IM-007 | ELK log event | Runtime | timestamp/category/eventId | Structured log для optional ELK |
+| IM-008 | Debug diagnostic event | Runtime | log category + message template | Diagnostic событие Basic/Verbose, отправляется через обычный logging pipeline |
 
 ## AD User Mapping
 
@@ -41,3 +42,14 @@ State не является источником прав. Он нужен, чт
 - Missing AD group или missing CMDBuild role останавливают весь run до write-операций.
 - Bootstrap tool не изменяет существующие AD groups и не добавляет members.
 - Dry-run не пишет CMDBuild, AD и state.
+
+## Чувствительность Логов
+
+| Тип данных | Где может появиться | Уровень |
+| --- | --- | --- |
+| Login пользователя | create/update/disable план, resolved group members | `Debug:Level=Verbose` |
+| Состав групп | resolved AD login lists | `Debug:Level=Verbose` |
+| Количество пользователей/групп | snapshot/group counters | `Debug:Level=Basic` |
+| Секреты | Не должны логироваться | Никогда |
+
+Секреты не пишутся в logs. Для проверки наличия ФИО/email verbose logs пишут только boolean-признаки, не значения атрибутов.
