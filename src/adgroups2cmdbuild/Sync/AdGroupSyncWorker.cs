@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using AdGroups2Cmdbuild.Configuration;
 
 namespace AdGroups2Cmdbuild.Sync;
 
@@ -6,6 +7,7 @@ public sealed class AdGroupSyncWorker(
     AdGroupSynchronizationService synchronizationService,
     SyncStatusStore statusStore,
     IOptions<SyncOptions> options,
+    IOptions<DebugOptions> debugOptions,
     ILogger<AdGroupSyncWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -15,6 +17,16 @@ public sealed class AdGroupSyncWorker(
         {
             logger.LogWarning("AD group synchronization is disabled by configuration");
             return;
+        }
+
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: sync worker configured: intervalSeconds={IntervalSeconds}, runImmediately={RunImmediately}, dryRun={DryRun}",
+                debugOptions.Value.NormalizedLevel(),
+                settings.IntervalSeconds,
+                settings.RunImmediately,
+                settings.DryRun);
         }
 
         if (settings.RunImmediately)
@@ -32,6 +44,11 @@ public sealed class AdGroupSyncWorker(
     private async Task RunGuardedAsync(CancellationToken stoppingToken)
     {
         statusStore.MarkStarted();
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation("Debug {DebugLevel}: AD group sync run started", debugOptions.Value.NormalizedLevel());
+        }
+
         try
         {
             var summary = await synchronizationService.RunOnceAsync(stoppingToken);

@@ -52,6 +52,11 @@ builder.Services.AddOptions<SyncOptions>()
     .Validate(options => !string.IsNullOrWhiteSpace(options.StateFilePath), "Sync:StateFilePath is required.")
     .ValidateOnStart();
 
+builder.Services.AddOptions<DebugOptions>()
+    .Bind(builder.Configuration.GetSection(DebugOptions.SectionName))
+    .Validate(options => options.HasValidLevel(), "Debug:Level must be Basic, Verbose, 1, or 2.")
+    .ValidateOnStart();
+
 builder.Services.AddOptions<ElkLoggingOptions>()
     .Bind(builder.Configuration.GetSection(ElkLoggingOptions.SectionName))
     .Validate(options => options.HasValidMinimumLevel(), "ElkLogging:MinimumLevel is invalid.")

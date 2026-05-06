@@ -53,8 +53,9 @@ docker run --rm \
 5. Выполнить bootstrap AD groups с `--apply`.
 6. Запустить сервис с `Sync:DryRun=true`.
 7. Проверить logs и `/sync/status`.
-8. Включить `Sync:DryRun=false`.
-9. Проверить CMDBuild users и groups.
+8. При необходимости временно включить `Debug:Enabled=true`, `Debug:Level=Basic`.
+9. Включить `Sync:DryRun=false`.
+10. Проверить CMDBuild users и groups.
 
 ## Smoke
 
@@ -77,3 +78,14 @@ git diff --check
 - Если сервис ошибочно заблокировал пользователей, откат выполняется восстановлением AD provisioning membership и повторным sync.
 - Если нужно остановить изменения немедленно, остановить service или задать `Sync:Enabled=false`.
 - Bootstrap tool не удаляет AD groups; ошибочно созданные groups удаляются отдельной AD admin процедурой.
+
+## Logging Without ELK
+
+Если ELK недоступен, сервис продолжает писать обычные console logs.
+Docker может отправлять stdout/stderr контейнера в syslog через logging driver:
+
+```bash
+docker run --log-driver=syslog --log-opt syslog-address=udp://syslog.example.local:514 ...
+```
+
+Альтернативы: Docker json-file + log agent, Filebeat/Vector/Fluent Bit на узле или sidecar collector.

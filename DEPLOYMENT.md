@@ -94,6 +94,9 @@ Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-sync'
 
 Sync__DryRun=true
 Sync__IntervalSeconds=300
+
+Debug__Enabled=false
+Debug__Level=Basic
 ```
 
 `ProvisioningGroupName` должен входить в `GroupNames`.
@@ -253,7 +256,56 @@ ElkLogging__Environment=Production
 
 Если `Endpoint` уже заканчивается на `/_doc` или `/_bulk`, URL используется как есть.
 
-## 10. Проверка После Запуска
+## 10. Debug Logging
+
+Для диагностики есть отдельный флаг `Debug`.
+Debug-события пишутся через стандартный `ILogger` на уровне `Information`, поэтому они видны в Docker stdout и попадают в ELK при включенном `ElkLogging`.
+
+```bash
+Debug__Enabled=true
+Debug__Level=Basic
+```
+
+Уровни:
+
+- `Basic` или `1`: границы sync-run, счетчики AD/CMDBuild snapshot, количество пользователей в группах, страницы CMDBuild, количество кандидатов на блокировку, запись state;
+- `Verbose` или `2`: все из Basic плюс per-user действия create/update/disable и resolved login lists по AD-группам.
+
+`Verbose` может раскрывать логины пользователей и состав групп. Включайте его точечно на время диагностики.
+
+## 11. Если ELK Нет
+
+Варианты сбора логов:
+
+1. Docker stdout/stderr: оставить приложение как есть и собирать `docker logs` средствами платформы.
+2. Docker syslog logging driver: приложение пишет в stdout, Docker пересылает в syslog.
+3. Агент на узле: Filebeat/Vector/Fluent Bit читает Docker container logs и отправляет в нужное хранилище.
+4. Sidecar collector: отдельный контейнер-агент рядом с сервисом.
+
+Syslog из Docker работает без изменения приложения через logging driver:
+
+```bash
+docker run -d \
+  --name adgroups2cmdbuild \
+  --log-driver=syslog \
+  --log-opt syslog-address=udp://syslog.example.local:514 \
+  --log-opt tag='adgroups2cmdbuild/{{.Name}}' \
+  -p 5084:8080 \
+  -v "$PWD/state:/app/state" \
+  ... \
+  adgroups2cmdbuild:0.1.0
+```
+
+Для TCP/TLS syslog используйте адреса вида:
+
+```bash
+--log-opt syslog-address=tcp://syslog.example.local:514
+--log-opt syslog-address=tcp+tls://syslog.example.local:6514
+```
+
+Ограничение: Docker syslog driver пересылает stdout/stderr контейнера. Он не использует `ElkLogging` и не требует отдельной syslog-библиотеки в приложении.
+
+## 12. Проверка После Запуска
 
 1. Проверить `/health`.
 2. Проверить `/sync/status`.
@@ -266,7 +318,7 @@ ElkLogging__Environment=Production
    - `userGroups`;
    - блокировку пользователя, удаленного из provisioning group.
 
-## 11. Rollback
+## 13. Rollback
 
 Если сервис еще в dry-run, rollback не нужен.
 
@@ -280,7 +332,7 @@ ElkLogging__Environment=Production
 
 Bootstrap tool не удаляет AD groups. Если группа создана ошибочно, удаление выполняется отдельной AD admin процедурой.
 
-## 12. Обязательные Проверки Перед Релизом
+## 14. Обязательные Проверки Перед Релизом
 
 ```bash
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal

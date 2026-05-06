@@ -1,5 +1,6 @@
 using AdGroups2Cmdbuild.ActiveDirectory;
 using AdGroups2Cmdbuild.Cmdbuild;
+using AdGroups2Cmdbuild.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace AdGroups2Cmdbuild.Sync;
@@ -11,10 +12,21 @@ public sealed class AdGroupSynchronizationService(
     IOptions<ActiveDirectoryOptions> adOptions,
     IOptions<CmdbuildOptions> cmdbuildOptions,
     IOptions<SyncOptions> syncOptions,
+    IOptions<DebugOptions> debugOptions,
     ILogger<AdGroupSynchronizationService> logger)
 {
     public async Task<SyncRunSummary> RunOnceAsync(CancellationToken cancellationToken)
     {
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: loading AD snapshot for groups {Groups}; provisioningGroup={ProvisioningGroup}; dryRun={DryRun}",
+                debugOptions.Value.NormalizedLevel(),
+                string.Join(", ", adOptions.Value.GroupNames),
+                adOptions.Value.ProvisioningGroupName,
+                syncOptions.Value.DryRun);
+        }
+
         var adSnapshot = await activeDirectoryClient.ReadGroupsAsync(cancellationToken);
         var cmdbSnapshot = await cmdbuildClient.ReadSnapshotAsync(cancellationToken);
         var state = await stateStore.LoadAsync(cancellationToken);
@@ -28,6 +40,26 @@ public sealed class AdGroupSynchronizationService(
         var managedRoleIds = adOptions.Value.GroupNames
             .Select(groupName => cmdbSnapshot.RolesByName[groupName].Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: snapshots validated: adUsers={AdUsers}, cmdbUsers={CmdbUsers}, cmdbRoles={CmdbRoles}, managedStateLogins={ManagedStateLogins}",
+                debugOptions.Value.NormalizedLevel(),
+                adSnapshot.Users.Count,
+                cmdbSnapshot.UsersByLogin.Count,
+                cmdbSnapshot.RolesByName.Count,
+                state.ManagedLogins.Count);
+
+            foreach (var (groupName, members) in adSnapshot.Groups.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                logger.LogInformation(
+                    "Debug {DebugLevel}: AD group {GroupName} has {MemberCount} resolved user member(s)",
+                    debugOptions.Value.NormalizedLevel(),
+                    groupName,
+                    members.Count);
+            }
+        }
 
         var created = 0;
         var updated = 0;
@@ -54,6 +86,7 @@ public sealed class AdGroupSynchronizationService(
                     () => cmdbuildClient.CreateUserAsync(request, cancellationToken));
                 state.ManagedLogins.Add(user.Login);
                 created++;
+                LogVerboseUserAction("create", user.Login, desiredRoles);
                 continue;
             }
 
@@ -62,9 +95,18 @@ public sealed class AdGroupSynchronizationService(
                 () => cmdbuildClient.UpdateUserAsync(existingUser, request, cancellationToken));
             state.ManagedLogins.Add(user.Login);
             updated++;
+            LogVerboseUserAction("update", user.Login, desiredRoles);
         }
 
         var deprovisionCandidates = BuildDeprovisionCandidates(state, adSnapshot, cmdbSnapshot, managedRoleIds, provisioningUsers);
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: calculated {CandidateCount} deprovision candidate(s)",
+                debugOptions.Value.NormalizedLevel(),
+                deprovisionCandidates.Count);
+        }
+
         foreach (var login in deprovisionCandidates.Order(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -77,11 +119,26 @@ public sealed class AdGroupSynchronizationService(
             await ApplyOrLogAsync($"disable user {login} and revoke all groups", () => cmdbuildClient.DisableUserAsync(existingUser, cancellationToken));
             state.ManagedLogins.Add(login);
             disabled++;
+            if (debugOptions.Value.IsVerboseEnabled())
+            {
+                logger.LogInformation("Debug Verbose: planned disable for login {Login}", login);
+            }
         }
 
         if (!syncOptions.Value.DryRun)
         {
             await stateStore.SaveAsync(state, cancellationToken);
+            if (debugOptions.Value.IsBasicEnabled())
+            {
+                logger.LogInformation(
+                    "Debug {DebugLevel}: sync state saved with {ManagedLoginCount} managed login(s)",
+                    debugOptions.Value.NormalizedLevel(),
+                    state.ManagedLogins.Count);
+            }
+        }
+        else if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation("Debug {DebugLevel}: sync state was not saved because dryRun=true", debugOptions.Value.NormalizedLevel());
         }
 
         return new SyncRunSummary(
@@ -170,5 +227,19 @@ public sealed class AdGroupSynchronizationService(
         }
 
         await action();
+    }
+
+    private void LogVerboseUserAction(string action, string login, IReadOnlyCollection<CmdbuildRole> desiredRoles)
+    {
+        if (!debugOptions.Value.IsVerboseEnabled())
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Debug Verbose: planned {Action} for login {Login}; desiredRoles={DesiredRoles}",
+            action,
+            login,
+            string.Join(", ", desiredRoles.Select(role => role.Name)));
     }
 }

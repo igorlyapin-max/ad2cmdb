@@ -26,6 +26,7 @@
 | `ActiveDirectory` | LDAP/LDAPS endpoint, bind account, group search, user attributes |
 | `Cmdbuild` | CMDBuild REST v3 URL, service account, user fields, role name fields |
 | `Sync` | Периодичность, dry-run, immediate start, state file |
+| `Debug` | Diagnostic logging flag and verbosity level `Basic`/`Verbose` |
 | `ElkLogging` | Optional отправка structured logs в ELK |
 | `Logging` | Обычный .NET console logging |
 
@@ -46,6 +47,9 @@ Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-admin'
 
 Sync__DryRun=false
 Sync__IntervalSeconds=300
+
+Debug__Enabled=true
+Debug__Level=Basic
 
 ElkLogging__Enabled=true
 ElkLogging__Endpoint=https://elastic.example.local:9200

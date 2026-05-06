@@ -49,6 +49,7 @@
 | `lastSucceeded=false` | Warning/Critical | Последний sync-run завершился ошибкой |
 | `lastCompletedUtc` старше 2 интервалов sync | Warning | Worker завис или не запускается |
 | `lastSummary.dryRun=true` в production | Warning | Изменения не применяются |
+| Debug `Verbose` включен дольше диагностического окна | Info/Warning | Может писать логины и состав групп |
 
 ## Bootstrap Tool
 

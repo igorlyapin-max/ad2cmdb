@@ -72,6 +72,20 @@ With `Cmdbuild:PreserveUnmanagedGroups=true`, only the configured AD/CMDBuild gr
 
 If `Cmdbuild:NewUserPassword` is empty, the service sends a generated random password when creating a CMDBuild user. This is intended for installations where login is handled by external authentication.
 
+## Debug Logging
+
+The service has a separate debug flag with two verbosity levels.
+Debug messages are written through normal `ILogger` at `Information` level, so they are visible in console logs and are sent to ELK when `ElkLogging` is enabled.
+
+```bash
+Debug__Enabled=true
+Debug__Level=Basic
+```
+
+Levels:
+- `Basic` or `1`: sync run boundaries, AD/CMDBuild snapshot counts, group counts, page counts, deprovision candidate count, state save decision;
+- `Verbose` or `2`: Basic plus per-user planned create/update/disable operations and resolved AD login lists.
+
 ## ELK Logging
 
 Logs are sent to ELK only when `ElkLogging:Enabled=true` and `ElkLogging:Endpoint` is not empty.
@@ -88,6 +102,8 @@ ElkLogging__Environment=Production
 
 When `Index` is set and `Endpoint` is an Elasticsearch base URL, logs are posted to `{Endpoint}/{Index}/_doc`.
 If `Endpoint` already ends with `/_doc` or `/_bulk`, it is used as-is.
+
+If ELK is not available, keep console logs and collect Docker stdout/stderr with your platform. Syslog works from Docker via the Docker logging driver, for example `--log-driver=syslog --log-opt syslog-address=udp://syslog.example.local:514`. In that mode the application still writes normal console logs; Docker forwards them to syslog.
 
 ## Run
 

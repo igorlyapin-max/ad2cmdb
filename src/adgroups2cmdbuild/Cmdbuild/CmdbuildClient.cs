@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AdGroups2Cmdbuild.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace AdGroups2Cmdbuild.Cmdbuild;
@@ -10,6 +11,7 @@ namespace AdGroups2Cmdbuild.Cmdbuild;
 public sealed class CmdbuildClient(
     HttpClient httpClient,
     IOptions<CmdbuildOptions> options,
+    IOptions<DebugOptions> debugOptions,
     ILogger<CmdbuildClient> logger) : ICmdbuildClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -17,6 +19,14 @@ public sealed class CmdbuildClient(
     public async Task<CmdbuildSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
     {
         var snapshot = new CmdbuildSnapshot();
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: reading CMDBuild snapshot from {BaseUrl}",
+                debugOptions.Value.NormalizedLevel(),
+                options.Value.BaseUrl);
+        }
+
         foreach (var role in await ReadRolesAsync(cancellationToken))
         {
             snapshot.RolesByName[role.Name] = role;
@@ -29,6 +39,13 @@ public sealed class CmdbuildClient(
         }
 
         logger.LogInformation("Read {RoleCount} CMDBuild roles and {UserCount} users", snapshot.RolesByName.Count, snapshot.UsersByLogin.Count);
+        if (debugOptions.Value.IsVerboseEnabled())
+        {
+            logger.LogInformation(
+                "Debug Verbose: CMDBuild role names: {RoleNames}",
+                string.Join(", ", snapshot.RolesByName.Keys.Order(StringComparer.OrdinalIgnoreCase)));
+        }
+
         return snapshot;
     }
 
@@ -76,6 +93,15 @@ public sealed class CmdbuildClient(
                 null,
                 cancellationToken);
             var page = ReadDataArray(document?.RootElement).ToArray();
+            if (debugOptions.Value.IsBasicEnabled())
+            {
+                logger.LogInformation(
+                    "Debug {DebugLevel}: CMDBuild roles page offset={Offset} returned {Count} item(s)",
+                    debugOptions.Value.NormalizedLevel(),
+                    offset,
+                    page.Length);
+            }
+
             foreach (var item in page)
             {
                 var id = ReadString(item, "_id") ?? ReadString(item, "id");
@@ -109,6 +135,15 @@ public sealed class CmdbuildClient(
                 null,
                 cancellationToken);
             var page = ReadDataArray(document?.RootElement).ToArray();
+            if (debugOptions.Value.IsBasicEnabled())
+            {
+                logger.LogInformation(
+                    "Debug {DebugLevel}: CMDBuild users page start={Start} returned {Count} item(s)",
+                    debugOptions.Value.NormalizedLevel(),
+                    start,
+                    page.Length);
+            }
+
             foreach (var item in page)
             {
                 var id = ReadString(item, "_id") ?? ReadString(item, "id");

@@ -1,12 +1,14 @@
 using System.DirectoryServices.Protocols;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
+using AdGroups2Cmdbuild.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace AdGroups2Cmdbuild.ActiveDirectory;
 
 public sealed class ActiveDirectoryClient(
     IOptions<ActiveDirectoryOptions> options,
+    IOptions<DebugOptions> debugOptions,
     ILogger<ActiveDirectoryClient> logger) : IActiveDirectoryClient
 {
     public async Task<AdGroupSnapshot> ReadGroupsAsync(CancellationToken cancellationToken)
@@ -16,8 +18,27 @@ public sealed class ActiveDirectoryClient(
 
         logger.LogInformation("Reading {GroupCount} AD groups from {Host}:{Port}", settings.GroupNames.Count, settings.Host, settings.Port);
         await Task.Run(connection.Bind, cancellationToken);
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: LDAP bind succeeded: host={Host}, port={Port}, ssl={UseSsl}, groupSearchBaseDn={GroupSearchBaseDn}, recursiveGroups={RecursiveGroups}",
+                debugOptions.Value.NormalizedLevel(),
+                settings.Host,
+                settings.Port,
+                settings.UseSsl,
+                settings.GroupSearchBaseDn,
+                settings.RecursiveGroups);
+        }
 
         var groupEntries = await SearchGroupsAsync(connection, settings, cancellationToken);
+        if (debugOptions.Value.IsBasicEnabled())
+        {
+            logger.LogInformation(
+                "Debug {DebugLevel}: LDAP group search returned {GroupEntryCount} group entrie(s)",
+                debugOptions.Value.NormalizedLevel(),
+                groupEntries.Count);
+        }
+
         var snapshot = new AdGroupSnapshot();
         var userByDn = new Dictionary<string, AdUserRecord>(StringComparer.OrdinalIgnoreCase);
 
@@ -44,9 +65,26 @@ public sealed class ActiveDirectoryClient(
             snapshot.FoundGroupNames.Add(groupName);
             var visitedGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { entry.DistinguishedName };
             var memberDns = await ReadMemberDnsAsync(connection, settings, entry, cancellationToken);
+            if (debugOptions.Value.IsBasicEnabled())
+            {
+                logger.LogInformation(
+                    "Debug {DebugLevel}: AD group {GroupName} has {RawMemberCount} raw member DN(s)",
+                    debugOptions.Value.NormalizedLevel(),
+                    groupName,
+                    memberDns.Count);
+            }
+
             foreach (var memberDn in memberDns)
             {
                 await AddMemberAsync(connection, settings, memberDn, groupUsers, snapshot.Users, userByDn, visitedGroups, cancellationToken);
+            }
+
+            if (debugOptions.Value.IsVerboseEnabled())
+            {
+                logger.LogInformation(
+                    "Debug Verbose: AD group {GroupName} resolved login(s): {Logins}",
+                    groupName,
+                    string.Join(", ", groupUsers.Keys.Order(StringComparer.OrdinalIgnoreCase)));
             }
         }
 
@@ -182,6 +220,15 @@ public sealed class ActiveDirectoryClient(
             memberDn,
             TrimToNull(ReadFirst(entry, settings.UserDisplayNameAttribute)),
             TrimToNull(ReadFirst(entry, settings.UserEmailAttribute)));
+
+        if (debugOptions.Value.IsVerboseEnabled())
+        {
+            logger.LogInformation(
+                "Debug Verbose: resolved AD user {Login}; displayNamePresent={DisplayNamePresent}; emailPresent={EmailPresent}",
+                user.Login,
+                !string.IsNullOrWhiteSpace(user.DisplayName),
+                !string.IsNullOrWhiteSpace(user.Email));
+        }
 
         userByDn[memberDn] = user;
         groupUsers[user.Login] = user;
