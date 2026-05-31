@@ -5,7 +5,8 @@
 | ID | Endpoint | Method | Назначение |
 | --- | --- | --- | --- |
 | HLT-001 | `/health` | GET | Проверка процесса и публикация текущего sync status |
-| HLT-002 | `/sync/status` | GET | Детальный статус последнего sync-run |
+| HLT-002 | `/ready` | GET | Readiness; shallow или dependency checks по настройке |
+| HLT-003 | `/sync/status` | GET | Детальный статус последнего sync-run |
 
 ## `/health`
 
@@ -33,11 +34,20 @@
       "updatedUsers": 117,
       "disabledUsers": 2,
       "skippedUsers": 0,
+      "failedUsers": 0,
       "dryRun": false
     }
   }
 }
 ```
+
+## `/ready`
+
+По умолчанию возвращает shallow readiness без обращения к AD/CMDBuild.
+Если `Readiness:CheckDependencies=true`, endpoint выполняет LDAP bind и lightweight CMDBuild REST call с timeout `Readiness:TimeoutMs`.
+При ошибке dependency возвращается HTTP `503`.
+
+Все status endpoints могут вернуть HTTP `429`, если превышен `EndpointRateLimiting`.
 
 ## Операционные Алерты
 
@@ -47,9 +57,10 @@
 | --- | --- | --- |
 | HTTP `/health` недоступен | Critical | Процесс не отвечает |
 | `lastSucceeded=false` | Warning/Critical | Последний sync-run завершился ошибкой |
+| `lastSummary.failedUsers > 0` | Warning | Batch завершился с partial failure по пользователям |
 | `lastCompletedUtc` старше 2 интервалов sync | Warning | Worker завис или не запускается |
 | `lastSummary.dryRun=true` в production | Warning | Изменения не применяются |
-| Debug `Verbose` включен дольше диагностического окна | Info/Warning | Может писать логины и состав групп |
+| Debug `Verbose` + `LogSensitiveValues=true` включен дольше диагностического окна | Info/Warning | Может писать логины и состав групп |
 
 ## Bootstrap Tool
 

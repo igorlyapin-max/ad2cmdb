@@ -26,11 +26,13 @@
 9. CMDBuild `email` или другой `Cmdbuild:UserEmailField` получает email из AD.
 10. CMDBuild `userGroups` для управляемых groups приводятся к membership в AD.
 11. Неуправляемые CMDBuild groups сохраняются, если `Cmdbuild:PreserveUnmanagedGroups=true`.
-12. State-файл обновляется только после успешного apply и только если `Sync:DryRun=false`.
+12. State-файл обновляется только если `Sync:DryRun=false`; при partial failure в state попадают только успешно примененные операции.
 
 Защиты:
 - `Sync:DryRun=true` по умолчанию.
 - Missing AD group и missing CMDBuild role считаются hard error.
+- Ошибка CMDBuild по одному пользователю логируется, увеличивает `failedUsers` и не останавливает batch.
+- Локальный lock-файл `Sync:InstanceLockPath` защищает от двух sync-run на одном хосте.
 - Ошибки отправки ELK logs не ломают sync.
 - PAM/AAPM `secret://...` без активного provider считается конфигурационной ошибкой.
 
@@ -79,7 +81,7 @@
 
 - `Debug:Enabled=false`: только обычные информационные, warning и error logs.
 - `Debug:Enabled=true`, `Debug:Level=Basic`: счетчики и ключевые этапы sync-run.
-- `Debug:Enabled=true`, `Debug:Level=Verbose`: Basic плюс per-user действия и resolved login lists.
+- `Debug:Enabled=true`, `Debug:Level=Verbose`: Basic плюс per-user действия и resolved login lists; sensitive values редактируются, если `Debug:LogSensitiveValues=false`.
 
 Каналы:
 
@@ -87,4 +89,4 @@
 2. ELK используется только при заполненном `ElkLogging:Endpoint` и `ElkLogging:Enabled=true`.
 3. Syslog не встроен в код: Docker пересылает stdout/stderr через `--log-driver=syslog`.
 
-Ограничение: `Verbose` может раскрывать логины и состав групп, поэтому включается только на диагностическое окно.
+Ограничение: `Verbose` с `Debug:LogSensitiveValues=true` может раскрывать логины и состав групп, поэтому включается только на диагностическое окно.

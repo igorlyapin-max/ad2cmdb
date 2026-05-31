@@ -13,4 +13,8 @@ public sealed class SyncOptions
     public bool RunImmediately { get; set; } = true;
 
     public string StateFilePath { get; set; } = "state/adgroups2cmdbuild-state.json";
+
+    public string InstanceLockPath { get; set; } = "state/adgroups2cmdbuild.lock";
+
+    public int FailureBackoffSeconds { get; set; } = 30;
 }

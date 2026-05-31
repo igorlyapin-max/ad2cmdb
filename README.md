@@ -13,7 +13,8 @@ Behavior:
 - CMDBuild username equals AD login (`sAMAccountName` by default);
 - AD `displayName` is written to CMDBuild `description` by default, configurable as `Cmdbuild:UserDisplayNameField`;
 - AD `mail` is written to CMDBuild `email`;
-- synchronization runs every 300 seconds by default.
+- synchronization runs every 300 seconds by default;
+- the service is designed for one active replica. Active-active operation is not supported with the file-based state store.
 
 The default config is `DryRun=true`; set `Sync__DryRun=false` only after checking logs against a test CMDBuild instance.
 Dry-run does not write CMDBuild and does not persist the local managed-login state file.
@@ -35,15 +36,20 @@ ActiveDirectory__GroupNames__0=CMDBuildUsers
 ActiveDirectory__GroupNames__1=CMDBuildEditors
 ActiveDirectory__ProvisioningGroupName=CMDBuildUsers
 
-Cmdbuild__BaseUrl=http://cmdbuild:8080/cmdbuild/services/rest/v3
+Cmdbuild__BaseUrl=https://cmdbuild.example/cmdbuild/services/rest/v3
 Cmdbuild__Username='<secret>'
 Cmdbuild__Password='<secret>'
 Cmdbuild__UserDisplayNameField=description
 Cmdbuild__UserEmailField=email
+Cmdbuild__RetryAttempts=3
 
 Sync__DryRun=false
 Sync__IntervalSeconds=300
+Sync__FailureBackoffSeconds=30
 ```
+
+In `Production`, `Cmdbuild:BaseUrl` must use HTTPS, `AllowedHosts` must not be `*`, and `ActiveDirectory:IgnoreCertificateErrors=true` is rejected.
+For production containers set `AllowedHosts` to the external DNS names accepted by the service.
 
 Secrets can be stored as plain env/config values for development or as PAM/AAPM references:
 
@@ -86,6 +92,8 @@ Levels:
 - `Basic` or `1`: sync run boundaries, AD/CMDBuild snapshot counts, group counts, page counts, deprovision candidate count, state save decision;
 - `Verbose` or `2`: Basic plus per-user planned create/update/disable operations and resolved AD login lists.
 
+By default verbose diagnostic lists redact sensitive login values. Set `Debug__LogSensitiveValues=true` only for a short diagnostic window if operators need raw logins in debug output.
+
 ## ELK Logging
 
 Logs are sent to ELK only when `ElkLogging:Enabled=true` and `ElkLogging:Endpoint` is not empty.
@@ -115,8 +123,13 @@ Health and status:
 
 ```bash
 curl http://localhost:5084/health
+curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
+
+`/health`, `/ready`, and `/sync/status` use the `EndpointRateLimiting` fixed-window limit. `/ready` is shallow by default; set `Readiness__CheckDependencies=true` to make it check LDAP bind and a lightweight CMDBuild REST call.
+
+If a single CMDBuild user operation fails, the sync run continues with the remaining users. `/sync/status` reports `lastSucceeded=false` and `lastSummary.failedUsers` when a run completed with partial failures.
 
 Docker build:
 

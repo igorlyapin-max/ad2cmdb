@@ -9,9 +9,12 @@
 | `adgroups2cmdbuild` | Микросервис, который раз в 5 минут читает группы MS AD и синхронизирует пользователей/группы CMDBuild |
 | `bootstrap-ad-groups` | Разовый deployment tool: создает отсутствующие AD-группы по существующим CMDBuild roles |
 | `state/adgroups2cmdbuild-state.json` | Локальное состояние управляемых логинов |
+| `state/adgroups2cmdbuild-state.json.bak` | Последний backup state перед успешной заменой |
+| `state/adgroups2cmdbuild.lock` | Локальный lock-файл, запрещающий два sync-run на одном хосте |
 | `ElkLogging` | Optional отправка structured logs в ELK/Elasticsearch |
 
 Основной принцип: MS AD является источником истины для членства в группах, CMDBuild является целевой системой.
+Сервис рассчитан на одну активную реплику. Active-active запуск с общим file-based state не поддерживается.
 
 ## 2. Предварительные Требования
 
@@ -94,6 +97,8 @@ Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-sync'
 
 Sync__DryRun=true
 Sync__IntervalSeconds=300
+Sync__FailureBackoffSeconds=30
+AllowedHosts=adgroups2cmdbuild.example.local
 
 Debug__Enabled=false
 Debug__Level=Basic
@@ -102,6 +107,14 @@ Debug__Level=Basic
 `ProvisioningGroupName` должен входить в `GroupNames`.
 Пользователь получает активную УЗ CMDBuild только если он состоит в provisioning group.
 Если пользователь пропал из provisioning group, сервис блокирует его и отзывает все CMDBuild groups.
+
+В `Production` действуют runtime guards:
+
+- `ActiveDirectory:IgnoreCertificateErrors=true` запрещен;
+- `Cmdbuild:BaseUrl` должен быть `https://...`;
+- `AllowedHosts` не должен быть `*`.
+
+Для локальной разработки используйте `ASPNETCORE_ENVIRONMENT=Development`.
 
 ## 5. Секреты и PAM/AAPM
 
@@ -186,6 +199,7 @@ Health:
 
 ```bash
 curl http://localhost:5084/health
+curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
 
@@ -221,6 +235,7 @@ docker run -d \
   -e Cmdbuild__Username=cmdbuild-sync \
   -e Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-sync' \
   -e Sync__DryRun=true \
+  -e AllowedHosts=adgroups2cmdbuild.example.local \
   adgroups2cmdbuild:0.1.0
 ```
 
@@ -271,7 +286,7 @@ Debug__Level=Basic
 - `Basic` или `1`: границы sync-run, счетчики AD/CMDBuild snapshot, количество пользователей в группах, страницы CMDBuild, количество кандидатов на блокировку, запись state;
 - `Verbose` или `2`: все из Basic плюс per-user действия create/update/disable и resolved login lists по AD-группам.
 
-`Verbose` может раскрывать логины пользователей и состав групп. Включайте его точечно на время диагностики.
+По умолчанию sensitive values в verbose diagnostic lists редактируются. Если нужны реальные логины и состав групп, задайте `Debug__LogSensitiveValues=true` только на короткое диагностическое окно.
 
 ## 11. Если ELK Нет
 
@@ -308,15 +323,18 @@ docker run -d \
 ## 12. Проверка После Запуска
 
 1. Проверить `/health`.
-2. Проверить `/sync/status`.
-3. Проверить logs на отсутствие ошибок missing AD group или missing CMDBuild role.
-4. При `Sync:DryRun=true` проверить, какие действия сервис планирует.
-5. При `Sync:DryRun=false` проверить несколько пользователей в CMDBuild:
+2. Проверить `/ready`.
+3. Проверить `/sync/status`.
+4. Проверить logs на отсутствие ошибок missing AD group или missing CMDBuild role.
+5. При `Sync:DryRun=true` проверить, какие действия сервис планирует.
+6. При `Sync:DryRun=false` проверить несколько пользователей в CMDBuild:
    - `active`;
    - `description` или выбранное поле ФИО;
    - `email`;
    - `userGroups`;
    - блокировку пользователя, удаленного из provisioning group.
+
+Если один пользователь не применился в CMDBuild, run продолжается. В `/sync/status` это видно как `lastSucceeded=false` и `lastSummary.failedUsers > 0`; смотрите error log по конкретному login и повторите sync после исправления причины.
 
 ## 13. Rollback
 
@@ -330,6 +348,10 @@ docker run -d \
 4. Запустить сервис в `Sync__DryRun=true`.
 5. После проверки вернуть `Sync__DryRun=false`.
 
+Если поврежден `state/adgroups2cmdbuild-state.json`, сервис пробует прочитать `state/adgroups2cmdbuild-state.json.bak`. Если оба файла повреждены, остановите сервис, восстановите state из backup платформы или удалите state только после ручной оценки последствий повторного deprovision/provision.
+
+При переименовании AD group или удалении CMDBuild role сначала обновите конфигурацию и проверьте dry-run. Missing configured group/role считается hard error, чтобы не выполнить массовые неверные изменения.
+
 Bootstrap tool не удаляет AD groups. Если группа создана ошибочно, удаление выполняется отдельной AD admin процедурой.
 
 ## 14. Обязательные Проверки Перед Релизом
@@ -337,6 +359,7 @@ Bootstrap tool не удаляет AD groups. Если группа создан
 ```bash
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
+./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
 ./scripts/bootstrap-ad-groups.sh --help
 git diff --check
 ```

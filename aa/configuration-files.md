@@ -8,6 +8,8 @@
 | `src/adgroups2cmdbuild/appsettings.Development.json` | Dev overrides без production secrets | Да |
 | `appsettings.Production.json` | Production overrides с секретами или локальными адресами | Нет |
 | `state/adgroups2cmdbuild-state.json` | State управляемых логинов и время последней успешной sync | Нет |
+| `state/adgroups2cmdbuild-state.json.bak` | Последний backup state | Нет |
+| `state/adgroups2cmdbuild.lock` | Lock-файл активного sync-run на хосте | Нет |
 
 .NET configuration order:
 
@@ -24,9 +26,11 @@
 | `Service` | Имя сервиса и health route |
 | `Secrets` | PAM/AAPM provider, references и bootstrap credentials |
 | `ActiveDirectory` | LDAP/LDAPS endpoint, bind account, group search, user attributes |
-| `Cmdbuild` | CMDBuild REST v3 URL, service account, user fields, role name fields |
-| `Sync` | Периодичность, dry-run, immediate start, state file |
-| `Debug` | Diagnostic logging flag and verbosity level `Basic`/`Verbose`; события пишутся через `ILogger` на `Information` |
+| `Cmdbuild` | CMDBuild REST v3 URL, service account, retry, user fields, role name fields |
+| `Sync` | Периодичность, dry-run, immediate start, state file, lock file и failure backoff |
+| `Debug` | Diagnostic logging flag, verbosity level `Basic`/`Verbose` и sensitive-value opt-in |
+| `Readiness` | `/ready` route, dependency checks и timeout |
+| `EndpointRateLimiting` | Fixed-window rate limit для `/health`, `/ready`, `/sync/status` |
 | `ElkLogging` | Optional отправка structured logs в ELK |
 | `Logging` | Обычный .NET console logging |
 
@@ -47,9 +51,14 @@ Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-admin'
 
 Sync__DryRun=false
 Sync__IntervalSeconds=300
+Sync__FailureBackoffSeconds=30
 
 Debug__Enabled=true
 Debug__Level=Basic
+Debug__LogSensitiveValues=false
+
+Readiness__CheckDependencies=true
+AllowedHosts=adgroups2cmdbuild.example.local
 
 ElkLogging__Enabled=true
 ElkLogging__Endpoint=https://elastic.example.local:9200

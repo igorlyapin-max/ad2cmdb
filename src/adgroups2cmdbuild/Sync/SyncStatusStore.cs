@@ -31,14 +31,15 @@ public sealed class SyncStatusStore
 
     public void MarkCompleted(SyncRunSummary summary)
     {
+        var hasFailures = summary.HasFailures;
         lock (gate)
         {
             status = status with
             {
                 IsRunning = false,
                 LastCompletedUtc = DateTimeOffset.UtcNow,
-                LastSucceeded = true,
-                LastError = null,
+                LastSucceeded = !hasFailures,
+                LastError = hasFailures ? $"{summary.FailedUsers} user operation(s) failed during sync run" : null,
                 LastSummary = summary
             };
         }

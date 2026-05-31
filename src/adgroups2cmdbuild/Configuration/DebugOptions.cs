@@ -8,6 +8,8 @@ public sealed class DebugOptions
 
     public string Level { get; set; } = "Basic";
 
+    public bool LogSensitiveValues { get; set; }
+
     public bool HasValidLevel()
     {
         return IsLevel("Basic")
@@ -29,6 +31,16 @@ public sealed class DebugOptions
     public string NormalizedLevel()
     {
         return IsVerboseEnabled() ? "Verbose" : "Basic";
+    }
+
+    public string FormatSensitive(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        return LogSensitiveValues ? value : "<redacted>";
     }
 
     private bool IsLevel(string value)

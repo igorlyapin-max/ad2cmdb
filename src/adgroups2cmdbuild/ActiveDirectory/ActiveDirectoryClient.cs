@@ -11,6 +11,13 @@ public sealed class ActiveDirectoryClient(
     IOptions<DebugOptions> debugOptions,
     ILogger<ActiveDirectoryClient> logger) : IActiveDirectoryClient
 {
+    public async Task CheckConnectionAsync(CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        using var connection = CreateConnection(settings);
+        await Task.Run(connection.Bind, cancellationToken);
+    }
+
     public async Task<AdGroupSnapshot> ReadGroupsAsync(CancellationToken cancellationToken)
     {
         var settings = options.Value;
@@ -84,7 +91,9 @@ public sealed class ActiveDirectoryClient(
                 logger.LogInformation(
                     "Debug Verbose: AD group {GroupName} resolved login(s): {Logins}",
                     groupName,
-                    string.Join(", ", groupUsers.Keys.Order(StringComparer.OrdinalIgnoreCase)));
+                    string.Join(", ", groupUsers.Keys
+                        .Order(StringComparer.OrdinalIgnoreCase)
+                        .Select(debugOptions.Value.FormatSensitive)));
             }
         }
 

@@ -65,6 +65,7 @@ public sealed class AdGroupSynchronizationService(
         var updated = 0;
         var disabled = 0;
         var skipped = 0;
+        var failed = 0;
 
         foreach (var user in provisioningUsers.Values.OrderBy(user => user.Login, StringComparer.OrdinalIgnoreCase))
         {
@@ -81,18 +82,30 @@ public sealed class AdGroupSynchronizationService(
                     continue;
                 }
 
-                await ApplyOrLogAsync(
+                if (!await ApplyOrLogAsync(
                     $"create user {user.Login} with groups {string.Join(", ", desiredRoles.Select(role => role.Name))}",
-                    () => cmdbuildClient.CreateUserAsync(request, cancellationToken));
+                    user.Login,
+                    () => cmdbuildClient.CreateUserAsync(request, cancellationToken)))
+                {
+                    failed++;
+                    continue;
+                }
+
                 state.ManagedLogins.Add(user.Login);
                 created++;
                 LogVerboseUserAction("create", user.Login, desiredRoles);
                 continue;
             }
 
-            await ApplyOrLogAsync(
+            if (!await ApplyOrLogAsync(
                 $"update user {user.Login} with groups {string.Join(", ", desiredRoles.Select(role => role.Name))}",
-                () => cmdbuildClient.UpdateUserAsync(existingUser, request, cancellationToken));
+                user.Login,
+                () => cmdbuildClient.UpdateUserAsync(existingUser, request, cancellationToken)))
+            {
+                failed++;
+                continue;
+            }
+
             state.ManagedLogins.Add(user.Login);
             updated++;
             LogVerboseUserAction("update", user.Login, desiredRoles);
@@ -116,12 +129,20 @@ public sealed class AdGroupSynchronizationService(
                 continue;
             }
 
-            await ApplyOrLogAsync($"disable user {login} and revoke all groups", () => cmdbuildClient.DisableUserAsync(existingUser, cancellationToken));
+            if (!await ApplyOrLogAsync(
+                $"disable user {login} and revoke all groups",
+                login,
+                () => cmdbuildClient.DisableUserAsync(existingUser, cancellationToken)))
+            {
+                failed++;
+                continue;
+            }
+
             state.ManagedLogins.Add(login);
             disabled++;
             if (debugOptions.Value.IsVerboseEnabled())
             {
-                logger.LogInformation("Debug Verbose: planned disable for login {Login}", login);
+                logger.LogInformation("Debug Verbose: planned disable for login {Login}", debugOptions.Value.FormatSensitive(login));
             }
         }
 
@@ -148,6 +169,7 @@ public sealed class AdGroupSynchronizationService(
             UpdatedUsers: updated,
             DisabledUsers: disabled,
             SkippedUsers: skipped,
+            FailedUsers: failed,
             DryRun: syncOptions.Value.DryRun);
     }
 
@@ -218,15 +240,28 @@ public sealed class AdGroupSynchronizationService(
             .ToArray();
     }
 
-    private async Task ApplyOrLogAsync(string operation, Func<Task> action)
+    private async Task<bool> ApplyOrLogAsync(string operation, string login, Func<Task> action)
     {
         if (syncOptions.Value.DryRun)
         {
             logger.LogInformation("Dry-run: would {Operation}", operation);
-            return;
+            return true;
         }
 
-        await action();
+        try
+        {
+            await action();
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "CMDBuild operation failed for login {Login}: {Operation}", login, operation);
+            return false;
+        }
     }
 
     private void LogVerboseUserAction(string action, string login, IReadOnlyCollection<CmdbuildRole> desiredRoles)
@@ -239,7 +274,7 @@ public sealed class AdGroupSynchronizationService(
         logger.LogInformation(
             "Debug Verbose: planned {Action} for login {Login}; desiredRoles={DesiredRoles}",
             action,
-            login,
+            debugOptions.Value.FormatSensitive(login),
             string.Join(", ", desiredRoles.Select(role => role.Name)));
     }
 }

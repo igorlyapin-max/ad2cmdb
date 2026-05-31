@@ -41,8 +41,12 @@ docker run --rm \
   -e Cmdbuild__Username=cmdbuild-admin \
   -e Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-admin' \
   -e Sync__DryRun=false \
+  -e AllowedHosts=adgroups2cmdbuild.example.local \
   adgroups2cmdbuild:dev
 ```
+
+Контейнерный image содержит Docker `HEALTHCHECK`, который вызывает `http://localhost:8080/health`.
+Для production обязательно задайте HTTPS `Cmdbuild__BaseUrl`, явный `AllowedHosts` и не включайте `ActiveDirectory__IgnoreCertificateErrors`.
 
 ## Deployment Order
 
@@ -52,7 +56,7 @@ docker run --rm \
 4. При необходимости выполнить bootstrap AD groups в dry-run.
 5. Выполнить bootstrap AD groups с `--apply`.
 6. Запустить сервис с `Sync:DryRun=true`.
-7. Проверить logs и `/sync/status`.
+7. Проверить logs, `/health`, `/ready` и `/sync/status`.
 8. При необходимости временно включить `Debug:Enabled=true`, `Debug:Level=Basic`.
 9. Включить `Sync:DryRun=false`.
 10. Проверить CMDBuild users и groups.
@@ -61,6 +65,7 @@ docker run --rm \
 
 ```bash
 curl http://localhost:5084/health
+curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
 
@@ -69,6 +74,7 @@ Build gates:
 ```bash
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
+./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
 git diff --check
 ```
 
@@ -77,6 +83,7 @@ git diff --check
 - Если `Sync:DryRun=true`, rollback не нужен: writes не выполнялись.
 - Если сервис ошибочно заблокировал пользователей, откат выполняется восстановлением AD provisioning membership и повторным sync.
 - Если нужно остановить изменения немедленно, остановить service или задать `Sync:Enabled=false`.
+- Если state поврежден, сервис пробует `.bak`; при повреждении обоих файлов остановите сервис и восстановите state из backup платформы.
 - Bootstrap tool не удаляет AD groups; ошибочно созданные groups удаляются отдельной AD admin процедурой.
 
 ## Logging Without ELK

@@ -1,0 +1,27 @@
+stages:
+  - build
+  - test
+  - security
+
+variables:
+  DOTNET_CLI_HOME: "$CI_PROJECT_DIR/.dotnet_home"
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+build:
+  stage: build
+  script:
+    - ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
+    - ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
+
+test:
+  stage: test
+  script:
+    - ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
+
+package_vulnerabilities:
+  stage: security
+  allow_failure: true
+  script:
+    - ./scripts/dotnet list src/adgroups2cmdbuild/adgroups2cmdbuild.csproj package --vulnerable
+    - ./scripts/dotnet list tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj package --vulnerable

@@ -7,4 +7,8 @@ public sealed record SyncRunSummary(
     int UpdatedUsers,
     int DisabledUsers,
     int SkippedUsers,
-    bool DryRun);
+    int FailedUsers,
+    bool DryRun)
+{
+    public bool HasFailures => FailedUsers > 0;
+}

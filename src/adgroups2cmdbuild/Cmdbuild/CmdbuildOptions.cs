@@ -16,6 +16,12 @@ public sealed class CmdbuildOptions
 
     public int RolesPageSize { get; set; } = 1000;
 
+    public int RetryAttempts { get; set; } = 3;
+
+    public int RetryBaseDelayMs { get; set; } = 250;
+
+    public int RetryMaxDelayMs { get; set; } = 2000;
+
     public string UserDisplayNameField { get; set; } = "description";
 
     public string UserEmailField { get; set; } = "email";

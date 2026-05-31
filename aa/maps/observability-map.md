@@ -15,7 +15,7 @@
 | Level | Alias | Содержимое |
 | --- | --- | --- |
 | `Basic` | `1` | Старт worker, старт sync-run, AD/CMDBuild snapshot counts, group counts, CMDBuild page counts, deprovision candidate count, state save decision |
-| `Verbose` | `2` | Все из Basic плюс per-user planned create/update/disable, resolved AD login lists по группам и признаки наличия ФИО/email |
+| `Verbose` | `2` | Все из Basic плюс per-user planned create/update/disable, resolved AD login lists по группам и признаки наличия ФИО/email; sensitive values редактируются по умолчанию |
 
 Debug-события пишутся через `ILogger` на уровне `Information`.
 Это сделано намеренно: включение `Debug:Enabled=true` не требует менять глобальный `Logging:LogLevel`, а события попадают в console/ELK/syslog тем же путем, что и обычные информационные логи.
@@ -67,6 +67,6 @@ docker run \
 
 ## Риски
 
-- `Debug:Level=Verbose` пишет логины и состав групп. Не держать постоянно включенным в production.
+- `Debug:Level=Verbose` вместе с `Debug:LogSensitiveValues=true` пишет логины и состав групп. Не держать постоянно включенным в production.
 - ELK endpoint/API key errors не попадают в `lastError`, потому что logging не должен ломать синхронизацию.
 - Если нужен гарантированный audit trail, его нужно проектировать отдельно; текущие логи являются operational telemetry.

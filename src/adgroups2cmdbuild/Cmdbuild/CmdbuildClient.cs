@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -15,6 +16,11 @@ public sealed class CmdbuildClient(
     ILogger<CmdbuildClient> logger) : ICmdbuildClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public async Task CheckConnectionAsync(CancellationToken cancellationToken)
+    {
+        using var document = await SendAsync(HttpMethod.Get, "/roles?limit=1&offset=0&detailed=false", null, cancellationToken);
+    }
 
     public async Task<CmdbuildSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
     {
@@ -250,6 +256,37 @@ public sealed class CmdbuildClient(
         JsonObject? body,
         CancellationToken cancellationToken)
     {
+        var attempts = Math.Max(1, options.Value.RetryAttempts);
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                return await SendOnceAsync(method, path, body, cancellationToken);
+            }
+            catch (Exception exception) when (ShouldRetry(exception, attempt, attempts, cancellationToken))
+            {
+                var delay = RetryDelay(attempt);
+                logger.LogWarning(
+                    exception,
+                    "Transient CMDBuild {Method} {Path} failure on attempt {Attempt}/{Attempts}; retrying in {DelayMs}ms",
+                    method,
+                    path,
+                    attempt,
+                    attempts,
+                    (int)delay.TotalMilliseconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+
+        return await SendOnceAsync(method, path, body, cancellationToken);
+    }
+
+    private async Task<JsonDocument?> SendOnceAsync(
+        HttpMethod method,
+        string path,
+        JsonObject? body,
+        CancellationToken cancellationToken)
+    {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMilliseconds(options.Value.RequestTimeoutMs));
 
@@ -281,6 +318,39 @@ public sealed class CmdbuildClient(
         }
 
         return JsonDocument.Parse(text);
+    }
+
+    private bool ShouldRetry(Exception exception, int attempt, int attempts, CancellationToken cancellationToken)
+    {
+        if (attempt >= attempts || cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        return exception switch
+        {
+            HttpRequestException httpRequestException => IsTransientStatus(httpRequestException.StatusCode),
+            TaskCanceledException => true,
+            TimeoutException => true,
+            _ => false
+        };
+    }
+
+    private static bool IsTransientStatus(HttpStatusCode? statusCode)
+    {
+        var code = (int?)statusCode;
+        return statusCode is HttpStatusCode.RequestTimeout
+            or HttpStatusCode.TooManyRequests
+            || code is >= 500 and <= 599;
+    }
+
+    private TimeSpan RetryDelay(int attempt)
+    {
+        var baseDelayMs = Math.Max(1, options.Value.RetryBaseDelayMs);
+        var maxDelayMs = Math.Max(baseDelayMs, options.Value.RetryMaxDelayMs);
+        var multiplier = Math.Pow(2, Math.Max(0, attempt - 1));
+        var delayMs = Math.Min(maxDelayMs, baseDelayMs * multiplier);
+        return TimeSpan.FromMilliseconds(delayMs);
     }
 
     private string BaseUrl()

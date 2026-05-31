@@ -5,6 +5,7 @@ namespace AdGroups2Cmdbuild.Sync;
 
 public sealed class AdGroupSyncWorker(
     AdGroupSynchronizationService synchronizationService,
+    SyncRunLock syncRunLock,
     SyncStatusStore statusStore,
     IOptions<SyncOptions> options,
     IOptions<DebugOptions> debugOptions,
@@ -31,18 +32,33 @@ public sealed class AdGroupSyncWorker(
 
         if (settings.RunImmediately)
         {
-            await RunGuardedAsync(stoppingToken);
+            var succeeded = await RunGuardedAsync(stoppingToken);
+            if (!succeeded)
+            {
+                await DelayAfterFailureAsync(settings, stoppingToken);
+            }
         }
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(settings.IntervalSeconds));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
-            await RunGuardedAsync(stoppingToken);
+            var succeeded = await RunGuardedAsync(stoppingToken);
+            if (!succeeded)
+            {
+                await DelayAfterFailureAsync(settings, stoppingToken);
+            }
         }
     }
 
-    private async Task RunGuardedAsync(CancellationToken stoppingToken)
+    private async Task<bool> RunGuardedAsync(CancellationToken stoppingToken)
     {
+        await using var lease = await syncRunLock.TryAcquireAsync(stoppingToken);
+        if (lease is null)
+        {
+            statusStore.MarkFailed(new InvalidOperationException("Another sync run holds the local instance lock."));
+            return false;
+        }
+
         statusStore.MarkStarted();
         if (debugOptions.Value.IsBasicEnabled())
         {
@@ -54,14 +70,16 @@ public sealed class AdGroupSyncWorker(
             var summary = await synchronizationService.RunOnceAsync(stoppingToken);
             statusStore.MarkCompleted(summary);
             logger.LogInformation(
-                "AD group sync completed: AD users={AdUsers}, provisioned={ProvisionedUsers}, created={CreatedUsers}, updated={UpdatedUsers}, disabled={DisabledUsers}, skipped={SkippedUsers}, dryRun={DryRun}",
+                "AD group sync completed: AD users={AdUsers}, provisioned={ProvisionedUsers}, created={CreatedUsers}, updated={UpdatedUsers}, disabled={DisabledUsers}, skipped={SkippedUsers}, failed={FailedUsers}, dryRun={DryRun}",
                 summary.AdUsers,
                 summary.ProvisionedUsers,
                 summary.CreatedUsers,
                 summary.UpdatedUsers,
                 summary.DisabledUsers,
                 summary.SkippedUsers,
+                summary.FailedUsers,
                 summary.DryRun);
+            return !summary.HasFailures;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -71,6 +89,18 @@ public sealed class AdGroupSyncWorker(
         {
             statusStore.MarkFailed(exception);
             logger.LogError(exception, "AD group sync failed");
+            return false;
         }
+    }
+
+    private async Task DelayAfterFailureAsync(SyncOptions settings, CancellationToken stoppingToken)
+    {
+        if (settings.FailureBackoffSeconds <= 0)
+        {
+            return;
+        }
+
+        logger.LogWarning("Delaying next sync attempt for {DelaySeconds} second(s) after failure", settings.FailureBackoffSeconds);
+        await Task.Delay(TimeSpan.FromSeconds(settings.FailureBackoffSeconds), stoppingToken);
     }
 }
