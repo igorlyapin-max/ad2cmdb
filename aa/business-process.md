@@ -32,9 +32,17 @@
 - `Sync:DryRun=true` по умолчанию.
 - Missing AD group и missing CMDBuild role считаются hard error.
 - Ошибка CMDBuild по одному пользователю логируется, увеличивает `failedUsers` и не останавливает batch.
+- Transient LDAP/LDAPS и CMDBuild REST ошибки повторяются с exponential backoff и jitter.
 - Локальный lock-файл `Sync:InstanceLockPath` защищает от двух sync-run на одном хосте.
 - Ошибки отправки ELK logs не ломают sync.
 - PAM/AAPM `secret://...` без активного provider считается конфигурационной ошибкой.
+
+Остановка:
+
+1. При SIGTERM/SIGINT worker прекращает запуск новых sync-run.
+2. Если sync-run уже выполняется, он продолжает работу до `Sync:ShutdownGracePeriodSeconds`.
+3. Если run успел завершиться, статус фиксируется как обычный completed/partial failure.
+4. Если timeout истек, run отменяется, `/sync/status` получает `lastSucceeded=false`, lock освобождается.
 
 ## BP-002. Блокировка пользователя
 

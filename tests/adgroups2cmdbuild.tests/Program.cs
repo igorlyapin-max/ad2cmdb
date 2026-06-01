@@ -2,6 +2,7 @@ using System.Text.Json;
 using AdGroups2Cmdbuild.ActiveDirectory;
 using AdGroups2Cmdbuild.Cmdbuild;
 using AdGroups2Cmdbuild.Configuration;
+using AdGroups2Cmdbuild.Resilience;
 using AdGroups2Cmdbuild.Sync;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -11,7 +12,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("per-user failure continues batch", PerUserFailureContinuesBatch),
     ("state store recovers from backup", StateStoreRecoversFromBackup),
     ("partial failure status is visible", PartialFailureStatusIsVisible),
-    ("debug sensitive values are masked by default", DebugSensitiveValuesAreMaskedByDefault)
+    ("debug sensitive values are masked by default", DebugSensitiveValuesAreMaskedByDefault),
+    ("retry backoff uses exponential cap", RetryBackoffUsesExponentialCap),
+    ("CMDBuild retry retries transient status", CmdbuildRetryRetriesTransientStatus),
+    ("CMDBuild retry skips authorization status", CmdbuildRetrySkipsAuthorizationStatus),
+    ("worker stop waits for active sync run", WorkerStopWaitsForActiveRun),
+    ("worker stop cancels after grace period", WorkerStopCancelsAfterGracePeriod)
 };
 
 var failed = 0;
@@ -120,6 +126,121 @@ static Task DebugSensitiveValuesAreMaskedByDefault()
     return Task.CompletedTask;
 }
 
+static Task RetryBackoffUsesExponentialCap()
+{
+    AssertEqual(250, (int)RetryBackoff.CalculateDelay(1, 250, 1000, 0).TotalMilliseconds, "attempt 1 delay");
+    AssertEqual(500, (int)RetryBackoff.CalculateDelay(2, 250, 1000, 0).TotalMilliseconds, "attempt 2 delay");
+    AssertEqual(1000, (int)RetryBackoff.CalculateDelay(3, 250, 1000, 0).TotalMilliseconds, "attempt 3 delay");
+    AssertEqual(1000, (int)RetryBackoff.CalculateDelay(4, 250, 1000, 0).TotalMilliseconds, "attempt 4 delay");
+    return Task.CompletedTask;
+}
+
+static async Task CmdbuildRetryRetriesTransientStatus()
+{
+    var handler = new SequenceHttpHandler(
+        _ => new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent("temporary")
+        },
+        _ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}")
+        });
+
+    var client = NewCmdbuildClient(handler, retryAttempts: 2);
+    await client.CheckConnectionAsync(CancellationToken.None);
+
+    AssertEqual(2, handler.RequestCount, "CMDBuild request count");
+}
+
+static async Task CmdbuildRetrySkipsAuthorizationStatus()
+{
+    var handler = new SequenceHttpHandler(
+        _ => new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("unauthorized")
+        },
+        _ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}")
+        });
+
+    var client = NewCmdbuildClient(handler, retryAttempts: 2);
+    try
+    {
+        await client.CheckConnectionAsync(CancellationToken.None);
+    }
+    catch (HttpRequestException)
+    {
+        AssertEqual(1, handler.RequestCount, "CMDBuild request count");
+        return;
+    }
+
+    throw new InvalidOperationException("expected CMDBuild authorization failure");
+}
+
+static async Task WorkerStopWaitsForActiveRun()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"adgroups2cmdbuild-worker-tests-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var groupName = "CMDBuildUsers";
+        var adClient = new FakeActiveDirectoryClient(NewAdSnapshot(groupName, "alice"), waitForRelease: true);
+        var cmdbuildClient = new FakeCmdbuildClient(NewCmdbSnapshot(groupName));
+        var statusStore = new SyncStatusStore();
+        var syncOptions = NewWorkerSyncOptions(directory, shutdownGracePeriodSeconds: 2);
+        using var worker = NewWorker(adClient, cmdbuildClient, statusStore, syncOptions, groupName);
+
+        await worker.StartAsync(CancellationToken.None);
+        await WaitAsync(adClient.ReadStarted.Task, TimeSpan.FromSeconds(2), "AD read start");
+
+        var stopTask = worker.StopAsync(CancellationToken.None);
+        await Task.Delay(150);
+        AssertEqual(false, stopTask.IsCompleted, "stop completed before run release");
+
+        adClient.ContinueRead.TrySetResult(true);
+        await WaitAsync(stopTask, TimeSpan.FromSeconds(3), "worker stop");
+
+        AssertEqual(false, adClient.Cancelled, "AD read canceled");
+        AssertEqual(true, statusStore.Current.LastSucceeded, "last succeeded");
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
+
+static async Task WorkerStopCancelsAfterGracePeriod()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"adgroups2cmdbuild-worker-tests-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var groupName = "CMDBuildUsers";
+        var adClient = new FakeActiveDirectoryClient(NewAdSnapshot(groupName, "alice"), waitForRelease: true);
+        var cmdbuildClient = new FakeCmdbuildClient(NewCmdbSnapshot(groupName));
+        var statusStore = new SyncStatusStore();
+        var syncOptions = NewWorkerSyncOptions(directory, shutdownGracePeriodSeconds: 0);
+        using var worker = NewWorker(adClient, cmdbuildClient, statusStore, syncOptions, groupName);
+
+        await worker.StartAsync(CancellationToken.None);
+        await WaitAsync(adClient.ReadStarted.Task, TimeSpan.FromSeconds(2), "AD read start");
+
+        await WaitAsync(worker.StopAsync(CancellationToken.None), TimeSpan.FromSeconds(2), "worker stop");
+
+        AssertEqual(true, adClient.Cancelled, "AD read canceled");
+        AssertEqual(false, statusStore.Current.LastSucceeded, "last succeeded");
+        AssertTrue(
+            statusStore.Current.LastError?.Contains("canceled", StringComparison.OrdinalIgnoreCase) == true,
+            "last error should describe cancellation");
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
+
 static AdGroupSnapshot NewAdSnapshot(string groupName, params string[] logins)
 {
     var snapshot = new AdGroupSnapshot();
@@ -142,6 +263,84 @@ static CmdbuildSnapshot NewCmdbSnapshot(string roleName)
     snapshot.RolesByName[roleName] = role;
     snapshot.RolesById[role.Id] = role;
     return snapshot;
+}
+
+static CmdbuildClient NewCmdbuildClient(SequenceHttpHandler handler, int retryAttempts)
+{
+    return new CmdbuildClient(
+        new HttpClient(handler),
+        Options.Create(new CmdbuildOptions
+        {
+            BaseUrl = "http://cmdbuild.example.local/cmdbuild/services/rest/v3",
+            Username = "cmdbuild-sync",
+            Password = "secret",
+            RetryAttempts = retryAttempts,
+            RetryBaseDelayMs = 1,
+            RetryMaxDelayMs = 1,
+            RetryJitterPercent = 0
+        }),
+        Options.Create(new DebugOptions()),
+        NullLogger<CmdbuildClient>.Instance);
+}
+
+static SyncOptions NewWorkerSyncOptions(string directory, int shutdownGracePeriodSeconds)
+{
+    return new SyncOptions
+    {
+        DryRun = true,
+        RunImmediately = true,
+        IntervalSeconds = 300,
+        StateFilePath = Path.Combine(directory, "state.json"),
+        InstanceLockPath = Path.Combine(directory, "sync.lock"),
+        ShutdownGracePeriodSeconds = shutdownGracePeriodSeconds
+    };
+}
+
+static AdGroupSyncWorker NewWorker(
+    FakeActiveDirectoryClient adClient,
+    FakeCmdbuildClient cmdbuildClient,
+    SyncStatusStore statusStore,
+    SyncOptions syncOptions,
+    string groupName)
+{
+    var adOptions = Options.Create(new ActiveDirectoryOptions
+    {
+        GroupNames = [groupName],
+        ProvisioningGroupName = groupName
+    });
+    var cmdbuildOptions = Options.Create(new CmdbuildOptions());
+    var debugOptions = Options.Create(new DebugOptions());
+    var syncOptionsAccessor = Options.Create(syncOptions);
+    var synchronizationService = new AdGroupSynchronizationService(
+        adClient,
+        cmdbuildClient,
+        new InMemoryStateStore(),
+        adOptions,
+        cmdbuildOptions,
+        syncOptionsAccessor,
+        debugOptions,
+        NullLogger<AdGroupSynchronizationService>.Instance);
+
+    return new AdGroupSyncWorker(
+        synchronizationService,
+        new SyncRunLock(syncOptionsAccessor, NullLogger<SyncRunLock>.Instance),
+        statusStore,
+        syncOptionsAccessor,
+        debugOptions,
+        NullLogger<AdGroupSyncWorker>.Instance);
+}
+
+static async Task WaitAsync(Task task, TimeSpan timeout, string operation)
+{
+    using var timeoutCancellation = new CancellationTokenSource(timeout);
+    try
+    {
+        await task.WaitAsync(timeoutCancellation.Token);
+    }
+    catch (OperationCanceledException)
+    {
+        throw new InvalidOperationException($"{operation} timed out");
+    }
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)
@@ -176,16 +375,41 @@ static void AssertDoesNotContain(string value, IEnumerable<string> values, strin
     }
 }
 
-internal sealed class FakeActiveDirectoryClient(AdGroupSnapshot snapshot) : IActiveDirectoryClient
+internal sealed class FakeActiveDirectoryClient(AdGroupSnapshot snapshot, bool waitForRelease = false) : IActiveDirectoryClient
 {
+    public TaskCompletionSource<bool> ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource<bool> ContinueRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool Cancelled { get; private set; }
+
     public Task<AdGroupSnapshot> ReadGroupsAsync(CancellationToken cancellationToken)
     {
-        return Task.FromResult(snapshot);
+        return ReadGroupsCoreAsync(cancellationToken);
     }
 
     public Task CheckConnectionAsync(CancellationToken cancellationToken)
     {
         return Task.CompletedTask;
+    }
+
+    private async Task<AdGroupSnapshot> ReadGroupsCoreAsync(CancellationToken cancellationToken)
+    {
+        ReadStarted.TrySetResult(true);
+        if (waitForRelease)
+        {
+            try
+            {
+                await ContinueRead.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                Cancelled = true;
+                throw;
+            }
+        }
+
+        return snapshot;
     }
 }
 
@@ -247,5 +471,20 @@ internal sealed class InMemoryStateStore : ISyncStateStore
         }
 
         return Task.CompletedTask;
+    }
+}
+
+internal sealed class SequenceHttpHandler(params Func<HttpRequestMessage, HttpResponseMessage>[] responses) : HttpMessageHandler
+{
+    private int index;
+
+    public int RequestCount { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        RequestCount++;
+        var responseIndex = Math.Min(index, responses.Length - 1);
+        index++;
+        return Task.FromResult(responses[responseIndex](request));
     }
 }

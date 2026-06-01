@@ -43,4 +43,12 @@ public sealed class ActiveDirectoryOptions
     public int RangeStep { get; set; } = 1500;
 
     public int RequestTimeoutMs { get; set; } = 15000;
+
+    public int RetryAttempts { get; set; } = 3;
+
+    public int RetryBaseDelayMs { get; set; } = 250;
+
+    public int RetryMaxDelayMs { get; set; } = 2000;
+
+    public int RetryJitterPercent { get; set; } = 20;
 }

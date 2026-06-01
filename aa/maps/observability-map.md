@@ -20,6 +20,16 @@
 Debug-события пишутся через `ILogger` на уровне `Information`.
 Это сделано намеренно: включение `Debug:Enabled=true` не требует менять глобальный `Logging:LogLevel`, а события попадают в console/ELK/syslog тем же путем, что и обычные информационные логи.
 
+## Ключевые Operational Events
+
+| Событие | Уровень | Назначение |
+| --- | --- | --- |
+| Старт/завершение sync-run | Information | Связать действия сервиса с интервалом синхронизации |
+| Transient AD retry | Warning | Видимость LDAP/LDAPS timeout/server down/busy/unavailable |
+| Transient CMDBuild retry | Warning | Видимость HTTP `408`, `429`, `5xx`, timeout и network errors |
+| Shutdown requested | Information | Понять, что процесс получил SIGTERM/SIGINT и остановил scheduling |
+| Shutdown grace expired | Warning | Понять, что активный run был отменен из-за `Sync:ShutdownGracePeriodSeconds` |
+
 ## ELK Contract
 
 Если `ElkLogging:Endpoint=https://elastic.example.local:9200` и `ElkLogging:Index=adgroups2cmdbuild-logs`, документ отправляется в:

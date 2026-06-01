@@ -90,14 +90,23 @@ ActiveDirectory__GroupSearchBaseDn='OU=CMDBuild,OU=Groups,DC=example,DC=local'
 ActiveDirectory__GroupNames__0=CMDBuildUsers
 ActiveDirectory__GroupNames__1=CMDBuildEditors
 ActiveDirectory__ProvisioningGroupName=CMDBuildUsers
+ActiveDirectory__RetryAttempts=3
+ActiveDirectory__RetryBaseDelayMs=250
+ActiveDirectory__RetryMaxDelayMs=2000
+ActiveDirectory__RetryJitterPercent=20
 
 Cmdbuild__BaseUrl='https://cmdbuild.example/cmdbuild/services/rest/v3'
 Cmdbuild__Username=cmdbuild-sync
 Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-sync'
+Cmdbuild__RetryAttempts=3
+Cmdbuild__RetryBaseDelayMs=250
+Cmdbuild__RetryMaxDelayMs=2000
+Cmdbuild__RetryJitterPercent=20
 
 Sync__DryRun=true
 Sync__IntervalSeconds=300
 Sync__FailureBackoffSeconds=30
+Sync__ShutdownGracePeriodSeconds=60
 AllowedHosts=adgroups2cmdbuild.example.local
 
 Debug__Enabled=false
@@ -115,6 +124,16 @@ Debug__Level=Basic
 - `AllowedHosts` не должен быть `*`.
 
 Для локальной разработки используйте `ASPNETCORE_ENVIRONMENT=Development`.
+
+### Retry
+
+Сервис повторяет только временные ошибки:
+
+- AD: timeout, server down, busy, unavailable и сетевые сбои при bind/search/range-read;
+- CMDBuild: HTTP `408`, `429`, `5xx`, timeout и сетевые сбои.
+
+Ошибки постоянного характера не повторяются: неверный bind password, `401/403`, неверный DN/filter, отсутствие прав или отсутствующая группа/role.
+Backoff общий для AD и CMDBuild: exponential delay от `RetryBaseDelayMs` до `RetryMaxDelayMs` плюс `RetryJitterPercent`.
 
 ## 5. Секреты и PAM/AAPM
 
@@ -247,6 +266,10 @@ docker rm -f adgroups2cmdbuild
 -e Sync__DryRun=false
 ```
 
+При `docker stop` контейнер получает SIGTERM.
+Worker сразу прекращает планировать новые sync-run и ждет активный run до `Sync__ShutdownGracePeriodSeconds`.
+Если время истекло, run отменяется, `/sync/status` получает `lastSucceeded=false`, а lock-файл освобождается при завершении процесса.
+
 ## 9. ELK Logging
 
 По умолчанию отправка логов в ELK выключена.
@@ -360,6 +383,8 @@ Bootstrap tool не удаляет AD groups. Если группа создан
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
 ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
+bash -n scripts/dotnet
+bash -n scripts/bootstrap-ad-groups.sh
 ./scripts/bootstrap-ad-groups.sh --help
 git diff --check
 ```

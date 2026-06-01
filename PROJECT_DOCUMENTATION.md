@@ -1,7 +1,7 @@
 # Документация проекта ad2cmdb
 
 Версия документации: `0.2.0`.
-Дата актуализации: 2026-05-31.
+Дата актуализации: 2026-06-01.
 
 ## Назначение
 
@@ -30,6 +30,8 @@ CMDBuild является целевой системой.
 - Каждая настроенная AD-группа должна иметь одноименную CMDBuild role.
 - Missing AD group или CMDBuild role останавливает sync-run до любых изменений.
 - Ошибка CMDBuild по одному пользователю не останавливает batch: остальные пользователи продолжают обрабатываться, а `/sync/status` показывает partial failure.
+- LDAP/LDAPS операции AD и REST-запросы CMDBuild повторяются только при transient ошибках с exponential backoff и jitter.
+- При остановке сервиса новые sync-run не запускаются; активный run получает до `Sync:ShutdownGracePeriodSeconds` на штатное завершение.
 - State сохраняется только после apply и только для успешно примененных операций.
 - `Sync:DryRun=true` ничего не пишет в CMDBuild и не сохраняет state.
 
@@ -73,13 +75,16 @@ State-файл:
 
 GitLab CI описан в `.gitlab-ci.yml`:
 
+- validate: restore, shell syntax и whitespace check;
 - build сервиса и bootstrap tool;
 - запуск `tests/adgroups2cmdbuild.tests`;
-- non-blocking проверка vulnerable NuGet packages.
+- blocking проверка vulnerable NuGet packages.
 
 Локальные обязательные проверки:
 
 ```bash
+bash -n scripts/dotnet
+bash -n scripts/bootstrap-ad-groups.sh
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
 ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj

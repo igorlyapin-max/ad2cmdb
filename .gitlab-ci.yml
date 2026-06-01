@@ -1,4 +1,7 @@
+image: mcr.microsoft.com/dotnet/sdk:10.0
+
 stages:
+  - validate
   - build
   - test
   - security
@@ -7,6 +10,29 @@ variables:
   DOTNET_CLI_HOME: "$CI_PROJECT_DIR/.dotnet_home"
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  NUGET_PACKAGES: "$CI_PROJECT_DIR/.nuget/packages"
+
+cache:
+  key: "$CI_PROJECT_NAME-nuget"
+  paths:
+    - .nuget/packages/
+    - .dotnet_home/
+
+validate:
+  stage: validate
+  script:
+    - ./scripts/dotnet restore src/adgroups2cmdbuild/adgroups2cmdbuild.csproj
+    - ./scripts/dotnet restore tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj
+    - bash -n scripts/dotnet
+    - bash -n scripts/bootstrap-ad-groups.sh
+    - |
+      if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}" ] && git cat-file -e "$CI_MERGE_REQUEST_DIFF_BASE_SHA^{commit}" 2>/dev/null; then
+        git diff --check "$CI_MERGE_REQUEST_DIFF_BASE_SHA" "$CI_COMMIT_SHA"
+      elif [ "${CI_COMMIT_BEFORE_SHA:-0000000000000000000000000000000000000000}" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$CI_COMMIT_BEFORE_SHA^{commit}" 2>/dev/null; then
+        git diff --check "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA"
+      else
+        git diff-tree --check --no-commit-id --root -r "$CI_COMMIT_SHA"
+      fi
 
 build:
   stage: build
@@ -21,7 +47,9 @@ test:
 
 package_vulnerabilities:
   stage: security
-  allow_failure: true
   script:
-    - ./scripts/dotnet list src/adgroups2cmdbuild/adgroups2cmdbuild.csproj package --vulnerable
-    - ./scripts/dotnet list tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj package --vulnerable
+    - ./scripts/dotnet list src/adgroups2cmdbuild/adgroups2cmdbuild.csproj package --vulnerable --include-transitive > src-vulnerabilities.txt
+    - ./scripts/dotnet list tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj package --vulnerable --include-transitive > tools-vulnerabilities.txt
+    - cat src-vulnerabilities.txt
+    - cat tools-vulnerabilities.txt
+    - 'if grep -Eq "has the following vulnerable packages" src-vulnerabilities.txt tools-vulnerabilities.txt; then exit 1; fi'

@@ -44,14 +44,19 @@ ActiveDirectory__Port=636
 ActiveDirectory__UseSsl=true
 ActiveDirectory__BindDn='CN=svc-cmdb,OU=Service Accounts,DC=example,DC=local'
 ActiveDirectory__BindPasswordSecret='AAA.LOCAL/PROD/ad-bind'
+ActiveDirectory__RetryAttempts=3
+ActiveDirectory__RetryJitterPercent=20
 
 Cmdbuild__BaseUrl=https://cmdbuild.example/cmdbuild/services/rest/v3
 Cmdbuild__Username=cmdbuild-admin
 Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-admin'
+Cmdbuild__RetryAttempts=3
+Cmdbuild__RetryJitterPercent=20
 
 Sync__DryRun=false
 Sync__IntervalSeconds=300
 Sync__FailureBackoffSeconds=30
+Sync__ShutdownGracePeriodSeconds=60
 
 Debug__Enabled=true
 Debug__Level=Basic
@@ -64,6 +69,14 @@ ElkLogging__Enabled=true
 ElkLogging__Endpoint=https://elastic.example.local:9200
 ElkLogging__ApiKey=secret://AAA.LOCAL/PROD/elk-api-key
 ```
+
+## Retry And Shutdown Settings
+
+| Секция | Параметры | Поведение |
+| --- | --- | --- |
+| `ActiveDirectory` | `RetryAttempts`, `RetryBaseDelayMs`, `RetryMaxDelayMs`, `RetryJitterPercent` | Retry для transient LDAP/LDAPS bind/search/range-read ошибок |
+| `Cmdbuild` | `RetryAttempts`, `RetryBaseDelayMs`, `RetryMaxDelayMs`, `RetryJitterPercent` | Retry для HTTP `408`, `429`, `5xx`, timeout и network errors |
+| `Sync` | `ShutdownGracePeriodSeconds` | Время ожидания активного sync-run при SIGTERM/SIGINT перед отменой |
 
 ## Bootstrap Tool Config
 

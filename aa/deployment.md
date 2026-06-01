@@ -47,6 +47,7 @@ docker run --rm \
 
 Контейнерный image содержит Docker `HEALTHCHECK`, который вызывает `http://localhost:8080/health`.
 Для production обязательно задайте HTTPS `Cmdbuild__BaseUrl`, явный `AllowedHosts` и не включайте `ActiveDirectory__IgnoreCertificateErrors`.
+При остановке контейнера worker прекращает новые sync-run и ждет активный run до `Sync__ShutdownGracePeriodSeconds`, затем отменяет его.
 
 ## Deployment Order
 
@@ -75,6 +76,8 @@ Build gates:
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
 ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
+bash -n scripts/dotnet
+bash -n scripts/bootstrap-ad-groups.sh
 git diff --check
 ```
 

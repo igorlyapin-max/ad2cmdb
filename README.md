@@ -35,6 +35,8 @@ ActiveDirectory__GroupSearchBaseDn='OU=Groups,DC=example,DC=local'
 ActiveDirectory__GroupNames__0=CMDBuildUsers
 ActiveDirectory__GroupNames__1=CMDBuildEditors
 ActiveDirectory__ProvisioningGroupName=CMDBuildUsers
+ActiveDirectory__RetryAttempts=3
+ActiveDirectory__RetryJitterPercent=20
 
 Cmdbuild__BaseUrl=https://cmdbuild.example/cmdbuild/services/rest/v3
 Cmdbuild__Username='<secret>'
@@ -42,10 +44,12 @@ Cmdbuild__Password='<secret>'
 Cmdbuild__UserDisplayNameField=description
 Cmdbuild__UserEmailField=email
 Cmdbuild__RetryAttempts=3
+Cmdbuild__RetryJitterPercent=20
 
 Sync__DryRun=false
 Sync__IntervalSeconds=300
 Sync__FailureBackoffSeconds=30
+Sync__ShutdownGracePeriodSeconds=60
 ```
 
 In `Production`, `Cmdbuild:BaseUrl` must use HTTPS, `AllowedHosts` must not be `*`, and `ActiveDirectory:IgnoreCertificateErrors=true` is rejected.
@@ -77,6 +81,17 @@ Use `RecursiveGroups=true` only if nested AD group membership should grant CMDBu
 With `Cmdbuild:PreserveUnmanagedGroups=true`, only the configured AD/CMDBuild groups are authoritative; unrelated CMDBuild groups already assigned to a user are preserved while the user remains provisioned. When a user leaves the provisioning group, all CMDBuild groups are revoked regardless of this flag.
 
 If `Cmdbuild:NewUserPassword` is empty, the service sends a generated random password when creating a CMDBuild user. This is intended for installations where login is handled by external authentication.
+
+## Retry And Shutdown
+
+AD LDAP/LDAPS operations and CMDBuild REST calls use exponential backoff with optional jitter.
+AD retry covers bind/search/range reads for transient LDAP/network failures such as timeout, server down, busy, or unavailable.
+CMDBuild retry covers HTTP `408`, `429`, `5xx`, timeout, and network failures.
+Authentication, authorization, invalid DN/filter, and other permanent errors are not retried.
+
+On SIGTERM/SIGINT the worker stops scheduling new runs.
+If a sync run is active, it waits up to `Sync:ShutdownGracePeriodSeconds` for normal completion.
+After that timeout the active run is canceled, `/sync/status` is marked failed, and the local sync lock is released.
 
 ## Debug Logging
 

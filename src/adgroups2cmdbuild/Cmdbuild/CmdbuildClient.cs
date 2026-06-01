@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AdGroups2Cmdbuild.Configuration;
+using AdGroups2Cmdbuild.Resilience;
 using Microsoft.Extensions.Options;
 
 namespace AdGroups2Cmdbuild.Cmdbuild;
@@ -268,11 +269,12 @@ public sealed class CmdbuildClient(
                 var delay = RetryDelay(attempt);
                 logger.LogWarning(
                     exception,
-                    "Transient CMDBuild {Method} {Path} failure on attempt {Attempt}/{Attempts}; retrying in {DelayMs}ms",
+                    "Transient CMDBuild {Method} {Path} failure on attempt {Attempt}/{Attempts}; status={StatusCode}; retrying in {DelayMs}ms",
                     method,
                     path,
                     attempt,
                     attempts,
+                    RetryStatus(exception),
                     (int)delay.TotalMilliseconds);
                 await Task.Delay(delay, cancellationToken);
             }
@@ -346,11 +348,21 @@ public sealed class CmdbuildClient(
 
     private TimeSpan RetryDelay(int attempt)
     {
-        var baseDelayMs = Math.Max(1, options.Value.RetryBaseDelayMs);
-        var maxDelayMs = Math.Max(baseDelayMs, options.Value.RetryMaxDelayMs);
-        var multiplier = Math.Pow(2, Math.Max(0, attempt - 1));
-        var delayMs = Math.Min(maxDelayMs, baseDelayMs * multiplier);
-        return TimeSpan.FromMilliseconds(delayMs);
+        return RetryBackoff.CalculateDelay(
+            attempt,
+            options.Value.RetryBaseDelayMs,
+            options.Value.RetryMaxDelayMs,
+            options.Value.RetryJitterPercent);
+    }
+
+    private static string RetryStatus(Exception exception)
+    {
+        if (exception is HttpRequestException { StatusCode: not null } httpRequestException)
+        {
+            return ((int)httpRequestException.StatusCode.Value).ToString();
+        }
+
+        return "none";
     }
 
     private string BaseUrl()

@@ -35,6 +35,8 @@ flowchart LR
     SVC -- create/update/disable users --> CMDB
     SVC -. optional logs .-> ELK
     SVC -. stdout/stderr .-> SYSLOG
+    SVC -. retry transient failures .-> AD
+    SVC -. retry transient failures .-> CMDB
     BOOT -- read roles --> CMDB
     BOOT -- create missing groups --> AD
 ```
@@ -47,3 +49,5 @@ flowchart LR
 - Разовая подготовка AD groups не встроена в сервис и запускается явно оператором.
 - По умолчанию опасные действия выключены: sync работает в `DryRun=true`, bootstrap tool работает без `--apply`.
 - Секреты не хранятся в git: используются env, mounted config или PAM/AAPM `secret://...`.
+- Transient ошибки AD/CMDBuild повторяются с bounded exponential backoff и jitter.
+- При остановке сервиса активный sync-run завершается штатно в пределах `Sync:ShutdownGracePeriodSeconds` либо отменяется с фиксацией ошибки в status.

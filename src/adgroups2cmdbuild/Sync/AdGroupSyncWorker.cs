@@ -11,6 +11,11 @@ public sealed class AdGroupSyncWorker(
     IOptions<DebugOptions> debugOptions,
     ILogger<AdGroupSyncWorker> logger) : BackgroundService
 {
+    private readonly object activeRunGate = new();
+    private readonly CancellationTokenSource shutdownRequested = new();
+    private CancellationTokenSource? activeRunCancellation;
+    private Task<bool>? activeRunTask;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var settings = options.Value;
@@ -30,43 +35,149 @@ public sealed class AdGroupSyncWorker(
                 settings.DryRun);
         }
 
-        if (settings.RunImmediately)
+        using var stoppingRegistration = stoppingToken.Register(
+            static state => ((CancellationTokenSource)state!).Cancel(),
+            shutdownRequested);
+        var schedulerToken = shutdownRequested.Token;
+
+        try
         {
-            var succeeded = await RunGuardedAsync(stoppingToken);
-            if (!succeeded)
+            if (settings.RunImmediately)
             {
-                await DelayAfterFailureAsync(settings, stoppingToken);
+                var succeeded = await RunTrackedAsync();
+                if (!succeeded)
+                {
+                    await DelayAfterFailureAsync(settings, schedulerToken);
+                }
+            }
+
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(settings.IntervalSeconds));
+            while (await timer.WaitForNextTickAsync(schedulerToken))
+            {
+                var succeeded = await RunTrackedAsync();
+                if (!succeeded)
+                {
+                    await DelayAfterFailureAsync(settings, schedulerToken);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (schedulerToken.IsCancellationRequested || stoppingToken.IsCancellationRequested)
+        {
+            logger.LogInformation("AD group sync worker stopped scheduling new runs");
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        logger.LogInformation("AD group sync worker shutdown requested");
+        await shutdownRequested.CancelAsync();
+
+        var activeRun = CurrentActiveRun();
+        if (activeRun is not null && !activeRun.IsCompleted)
+        {
+            var gracePeriod = TimeSpan.FromSeconds(Math.Max(0, options.Value.ShutdownGracePeriodSeconds));
+            if (gracePeriod > TimeSpan.Zero)
+            {
+                logger.LogInformation(
+                    "Waiting up to {GracePeriodSeconds} second(s) for active AD group sync run to finish",
+                    (int)gracePeriod.TotalSeconds);
+                var completed = await Task.WhenAny(activeRun, Task.Delay(gracePeriod, cancellationToken)) == activeRun;
+                if (completed)
+                {
+                    logger.LogInformation("Active AD group sync run finished during shutdown grace period");
+                }
+                else
+                {
+                    logger.LogWarning("Canceling active AD group sync run after shutdown grace period expired");
+                    CancelActiveRun();
+                }
+            }
+            else
+            {
+                logger.LogWarning("Canceling active AD group sync run immediately because shutdown grace period is zero");
+                CancelActiveRun();
             }
         }
 
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(settings.IntervalSeconds));
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        await base.StopAsync(cancellationToken);
+    }
+
+    public override void Dispose()
+    {
+        shutdownRequested.Dispose();
+        base.Dispose();
+    }
+
+    private async Task<bool> RunTrackedAsync()
+    {
+        using var runCancellation = new CancellationTokenSource();
+        var runCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (activeRunGate)
         {
-            var succeeded = await RunGuardedAsync(stoppingToken);
-            if (!succeeded)
+            activeRunCancellation = runCancellation;
+            activeRunTask = runCompletion.Task;
+        }
+
+        try
+        {
+            var succeeded = await RunGuardedAsync(runCancellation.Token);
+            runCompletion.TrySetResult(succeeded);
+            return succeeded;
+        }
+        catch (Exception exception)
+        {
+            runCompletion.TrySetException(exception);
+            throw;
+        }
+        finally
+        {
+            lock (activeRunGate)
             {
-                await DelayAfterFailureAsync(settings, stoppingToken);
+                if (ReferenceEquals(activeRunCancellation, runCancellation))
+                {
+                    activeRunCancellation = null;
+                    activeRunTask = null;
+                }
             }
+        }
+    }
+
+    private Task<bool>? CurrentActiveRun()
+    {
+        lock (activeRunGate)
+        {
+            return activeRunTask;
+        }
+    }
+
+    private void CancelActiveRun()
+    {
+        lock (activeRunGate)
+        {
+            activeRunCancellation?.Cancel();
         }
     }
 
     private async Task<bool> RunGuardedAsync(CancellationToken stoppingToken)
     {
-        await using var lease = await syncRunLock.TryAcquireAsync(stoppingToken);
-        if (lease is null)
-        {
-            statusStore.MarkFailed(new InvalidOperationException("Another sync run holds the local instance lock."));
-            return false;
-        }
-
-        statusStore.MarkStarted();
-        if (debugOptions.Value.IsBasicEnabled())
-        {
-            logger.LogInformation("Debug {DebugLevel}: AD group sync run started", debugOptions.Value.NormalizedLevel());
-        }
+        SyncRunLease? lease = null;
 
         try
         {
+            lease = await syncRunLock.TryAcquireAsync(stoppingToken);
+            if (lease is null)
+            {
+                statusStore.MarkFailed(new InvalidOperationException("Another sync run holds the local instance lock."));
+                return false;
+            }
+
+            statusStore.MarkStarted();
+            if (debugOptions.Value.IsBasicEnabled())
+            {
+                logger.LogInformation("Debug {DebugLevel}: AD group sync run started", debugOptions.Value.NormalizedLevel());
+            }
+
             var summary = await synchronizationService.RunOnceAsync(stoppingToken);
             statusStore.MarkCompleted(summary);
             logger.LogInformation(
@@ -83,13 +194,23 @@ public sealed class AdGroupSyncWorker(
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            throw;
+            var exception = new OperationCanceledException("AD group sync run was canceled.");
+            statusStore.MarkFailed(exception);
+            logger.LogWarning(exception, "AD group sync run canceled");
+            return false;
         }
         catch (Exception exception)
         {
             statusStore.MarkFailed(exception);
             logger.LogError(exception, "AD group sync failed");
             return false;
+        }
+        finally
+        {
+            if (lease is not null)
+            {
+                await lease.DisposeAsync();
+            }
         }
     }
 

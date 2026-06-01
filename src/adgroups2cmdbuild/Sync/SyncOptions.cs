@@ -17,4 +17,6 @@ public sealed class SyncOptions
     public string InstanceLockPath { get; set; } = "state/adgroups2cmdbuild.lock";
 
     public int FailureBackoffSeconds { get; set; } = 30;
+
+    public int ShutdownGracePeriodSeconds { get; set; } = 60;
 }

@@ -1,7 +1,9 @@
 using System.DirectoryServices.Protocols;
+using System.Net.Sockets;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using AdGroups2Cmdbuild.Configuration;
+using AdGroups2Cmdbuild.Resilience;
 using Microsoft.Extensions.Options;
 
 namespace AdGroups2Cmdbuild.ActiveDirectory;
@@ -15,7 +17,10 @@ public sealed class ActiveDirectoryClient(
     {
         var settings = options.Value;
         using var connection = CreateConnection(settings);
-        await Task.Run(connection.Bind, cancellationToken);
+        await ExecuteWithRetryAsync(
+            "LDAP bind",
+            token => Task.Run(() => connection.Bind(), token),
+            cancellationToken);
     }
 
     public async Task<AdGroupSnapshot> ReadGroupsAsync(CancellationToken cancellationToken)
@@ -24,7 +29,10 @@ public sealed class ActiveDirectoryClient(
         using var connection = CreateConnection(settings);
 
         logger.LogInformation("Reading {GroupCount} AD groups from {Host}:{Port}", settings.GroupNames.Count, settings.Host, settings.Port);
-        await Task.Run(connection.Bind, cancellationToken);
+        await ExecuteWithRetryAsync(
+            "LDAP bind",
+            token => Task.Run(() => connection.Bind(), token),
+            cancellationToken);
         if (debugOptions.Value.IsBasicEnabled())
         {
             logger.LogInformation(
@@ -126,21 +134,24 @@ public sealed class ActiveDirectoryClient(
         return connection;
     }
 
-    private static Task<List<SearchResultEntry>> SearchGroupsAsync(
+    private Task<List<SearchResultEntry>> SearchGroupsAsync(
         LdapConnection connection,
         ActiveDirectoryOptions settings,
         CancellationToken cancellationToken)
     {
         var groupFilter = BuildGroupFilter(settings);
-        var request = new SearchRequest(
-            settings.GroupSearchBaseDn,
-            groupFilter,
-            SearchScope.Subtree,
-            settings.GroupNameAttribute,
-            settings.MemberAttribute,
-            "distinguishedName");
-
-        return SearchAllAsync(connection, request, settings.PageSize, cancellationToken);
+        return SearchAllAsync(
+            connection,
+            () => new SearchRequest(
+                settings.GroupSearchBaseDn,
+                groupFilter,
+                SearchScope.Subtree,
+                settings.GroupNameAttribute,
+                settings.MemberAttribute,
+                "distinguishedName"),
+            settings.PageSize,
+            "LDAP group search",
+            cancellationToken);
     }
 
     private static string BuildGroupFilter(ActiveDirectoryOptions settings)
@@ -244,28 +255,31 @@ public sealed class ActiveDirectoryClient(
         snapshotUsers[user.Login] = user;
     }
 
-    private static async Task<SearchResultEntry?> ReadEntryByDnAsync(
+    private async Task<SearchResultEntry?> ReadEntryByDnAsync(
         LdapConnection connection,
         ActiveDirectoryOptions settings,
         string dn,
         CancellationToken cancellationToken)
     {
-        var request = new SearchRequest(
-            dn,
-            "(objectClass=*)",
-            SearchScope.Base,
-            "objectClass",
-            settings.MemberAttribute,
-            settings.UserLoginAttribute,
-            settings.UserDisplayNameAttribute,
-            settings.UserEmailAttribute,
-            "userAccountControl");
-
-        var entries = await SearchAllAsync(connection, request, settings.PageSize, cancellationToken);
+        var entries = await SearchAllAsync(
+            connection,
+            () => new SearchRequest(
+                dn,
+                "(objectClass=*)",
+                SearchScope.Base,
+                "objectClass",
+                settings.MemberAttribute,
+                settings.UserLoginAttribute,
+                settings.UserDisplayNameAttribute,
+                settings.UserEmailAttribute,
+                "userAccountControl"),
+            settings.PageSize,
+            "LDAP member entry read",
+            cancellationToken);
         return entries.Count > 0 ? entries[0] : null;
     }
 
-    private static async Task<List<string>> ReadMemberDnsAsync(
+    private async Task<List<string>> ReadMemberDnsAsync(
         LdapConnection connection,
         ActiveDirectoryOptions settings,
         SearchResultEntry groupEntry,
@@ -279,8 +293,12 @@ public sealed class ActiveDirectoryClient(
             var nextStart = range.Value.End + 1;
             var nextEnd = nextStart + Math.Max(1, settings.RangeStep) - 1;
             var attributeName = $"{settings.MemberAttribute};range={nextStart}-{nextEnd}";
-            var request = new SearchRequest(groupEntry.DistinguishedName, "(objectClass=*)", SearchScope.Base, attributeName);
-            var entries = await SearchAllAsync(connection, request, settings.PageSize, cancellationToken);
+            var entries = await SearchAllAsync(
+                connection,
+                () => new SearchRequest(groupEntry.DistinguishedName, "(objectClass=*)", SearchScope.Base, attributeName),
+                settings.PageSize,
+                "LDAP group member range read",
+                cancellationToken);
             if (entries.Count == 0)
             {
                 break;
@@ -328,7 +346,20 @@ public sealed class ActiveDirectoryClient(
         return lastRange;
     }
 
-    private static Task<List<SearchResultEntry>> SearchAllAsync(
+    private Task<List<SearchResultEntry>> SearchAllAsync(
+        LdapConnection connection,
+        Func<SearchRequest> requestFactory,
+        int pageSize,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        return ExecuteWithRetryAsync(
+            operationName,
+            token => SearchAllOnceAsync(connection, requestFactory(), pageSize, token),
+            cancellationToken);
+    }
+
+    private static Task<List<SearchResultEntry>> SearchAllOnceAsync(
         LdapConnection connection,
         SearchRequest request,
         int pageSize,
@@ -362,6 +393,96 @@ public sealed class ActiveDirectoryClient(
 
             return entries;
         }, cancellationToken);
+    }
+
+    private async Task ExecuteWithRetryAsync(
+        string operationName,
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteWithRetryAsync(
+            operationName,
+            async token =>
+            {
+                await operation(token);
+                return true;
+            },
+            cancellationToken);
+    }
+
+    private async Task<T> ExecuteWithRetryAsync<T>(
+        string operationName,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        var attempts = Math.Max(1, settings.RetryAttempts);
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                return await operation(cancellationToken);
+            }
+            catch (Exception exception) when (ShouldRetry(exception, attempt, attempts, cancellationToken))
+            {
+                var delay = RetryBackoff.CalculateDelay(
+                    attempt,
+                    settings.RetryBaseDelayMs,
+                    settings.RetryMaxDelayMs,
+                    settings.RetryJitterPercent);
+                logger.LogWarning(
+                    exception,
+                    "Transient AD {Operation} failure on attempt {Attempt}/{Attempts}; ldapCode={LdapCode}; retrying in {DelayMs}ms",
+                    operationName,
+                    attempt,
+                    attempts,
+                    LdapCode(exception),
+                    (int)delay.TotalMilliseconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("AD retry loop exhausted unexpectedly.");
+    }
+
+    private static bool ShouldRetry(Exception exception, int attempt, int attempts, CancellationToken cancellationToken)
+    {
+        if (attempt >= attempts || cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        return exception switch
+        {
+            LdapException ldapException => IsTransientLdapCode(ldapException.ErrorCode),
+            DirectoryOperationException directoryException => IsTransientDirectoryResult(directoryException),
+            IOException => true,
+            SocketException => true,
+            TimeoutException => true,
+            TaskCanceledException => true,
+            _ => exception.InnerException is not null && ShouldRetry(exception.InnerException, attempt, attempts, cancellationToken)
+        };
+    }
+
+    private static bool IsTransientLdapCode(int code)
+    {
+        return code is 51 or 52 or 80 or 81 or 85 or 91;
+    }
+
+    private static bool IsTransientDirectoryResult(DirectoryOperationException exception)
+    {
+        var code = (int?)exception.Response?.ResultCode;
+        return code is 3 or 51 or 52 or 80;
+    }
+
+    private static string LdapCode(Exception exception)
+    {
+        return exception switch
+        {
+            LdapException ldapException => ldapException.ErrorCode.ToString(),
+            DirectoryOperationException directoryException => ((int?)directoryException.Response?.ResultCode)?.ToString() ?? "none",
+            _ => "none"
+        };
     }
 
     private static IReadOnlyList<string> ReadValues(SearchResultEntry entry, string attributeName)

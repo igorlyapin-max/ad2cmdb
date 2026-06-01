@@ -22,6 +22,8 @@ public sealed class CmdbuildOptions
 
     public int RetryMaxDelayMs { get; set; } = 2000;
 
+    public int RetryJitterPercent { get; set; } = 20;
+
     public string UserDisplayNameField { get; set; } = "description";
 
     public string UserEmailField { get; set; } = "email";

@@ -58,6 +58,7 @@
 | HTTP `/health` недоступен | Critical | Процесс не отвечает |
 | `lastSucceeded=false` | Warning/Critical | Последний sync-run завершился ошибкой |
 | `lastSummary.failedUsers > 0` | Warning | Batch завершился с partial failure по пользователям |
+| `lastError` содержит cancellation после остановки | Info/Warning | Активный run был отменен после истечения shutdown grace-period |
 | `lastCompletedUtc` старше 2 интервалов sync | Warning | Worker завис или не запускается |
 | `lastSummary.dryRun=true` в production | Warning | Изменения не применяются |
 | Debug `Verbose` + `LogSensitiveValues=true` включен дольше диагностического окна | Info/Warning | Может писать логины и состав групп |
