@@ -14,10 +14,12 @@
 | [deployment.md](deployment.md) | Развертывание сервиса, Docker, ports, smoke и rollback |
 | [information-model.md](information-model.md) | Информационные сущности, ключи и правила владения данными |
 | [modernization-backlog.md](modernization-backlog.md) | Текущий modernization baseline, закрытые P1 gaps и backlog |
+| [test-coverage.md](test-coverage.md) | Карта покрытия автотестами, ручными smoke checks и remaining external coverage |
 | [maps/access-map.md](maps/access-map.md) | Внешние подключения и минимальные права |
 | [maps/healthcheck-map.md](maps/healthcheck-map.md) | Health/status endpoints и операционные проверки |
 | [maps/observability-map.md](maps/observability-map.md) | Console, ELK, Docker syslog и debug-level logging |
 | [maps/secrets-map.md](maps/secrets-map.md) | Секреты, PAM/AAPM ссылки и runtime-поля |
+| [monitoring/README.md](monitoring/README.md) | Zabbix и Prometheus/Grafana artifacts для monitoring rollout |
 
 ## Контекст
 
@@ -53,4 +55,5 @@ flowchart LR
 - Секреты не хранятся в git: используются env, mounted config или PAM/AAPM `secret://...`.
 - Transient ошибки AD/CMDBuild повторяются с bounded exponential backoff и jitter.
 - Health/readiness/status API имеет машинный OpenAPI contract для contract tests и внешней документации.
+- Zabbix и Prometheus/Grafana monitoring artifacts поставляются как архитектурные артефакты.
 - При остановке сервиса активный sync-run завершается штатно в пределах `Sync:ShutdownGracePeriodSeconds` либо отменяется с фиксацией ошибки в status.

@@ -6,8 +6,11 @@ using System.Text.Json;
 using AdGroups2Cmdbuild.ActiveDirectory;
 using AdGroups2Cmdbuild.Cmdbuild;
 using AdGroups2Cmdbuild.Configuration;
+using AdGroups2Cmdbuild.Logging;
 using AdGroups2Cmdbuild.Resilience;
+using AdGroups2Cmdbuild.Secrets;
 using AdGroups2Cmdbuild.Sync;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -22,7 +25,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("production startup rejects unsafe runtime config", ProductionStartupRejectsUnsafeRuntimeConfig),
     ("production startup accepts safe runtime config", ProductionStartupAcceptsSafeRuntimeConfig),
     ("development health and readiness endpoints work without dependencies", DevelopmentHealthAndReadinessEndpointsWorkWithoutDependencies),
+    ("runtime endpoint responses match OpenAPI required fields", RuntimeEndpointResponsesMatchOpenApiRequiredFields),
     ("operational OpenAPI contract describes runtime endpoints", OperationalOpenApiContractDescribesRuntimeEndpoints),
+    ("Dockerfile enforces non-root runtime policy", DockerfileEnforcesNonRootRuntimePolicy),
     ("retry backoff uses exponential cap", RetryBackoffUsesExponentialCap),
     ("CMDBuild retry retries transient status", CmdbuildRetryRetriesTransientStatus),
     ("CMDBuild retry skips authorization status", CmdbuildRetrySkipsAuthorizationStatus),
@@ -35,9 +40,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("dry-run does not save sync state", DryRunDoesNotSaveSyncState),
     ("sync deprovisions managed user outside provisioning group", SyncDeprovisionsManagedUserOutsideProvisioningGroup),
     ("ELK logging options validate active sink", ElkLoggingOptionsValidateActiveSink),
+    ("ELK logger sends structured HTTP event", ElkLoggerSendsStructuredHttpEvent),
+    ("secret resolver handles companion references and PAM compatibility", SecretResolverHandlesCompanionReferencesAndPamCompatibility),
+    ("secret resolver resolves Indeed PAM AAPM HTTP response", SecretResolverResolvesIndeedPamAapmHttpResponse),
     ("bootstrap tool help works", BootstrapToolHelpWorks),
     ("bootstrap role selection uses explicit precedence", BootstrapRoleSelectionUsesExplicitPrecedence),
     ("bootstrap naming logic escapes and rejects unsafe values", BootstrapNamingLogicEscapesAndRejectsUnsafeValues),
+    ("monitoring artifacts cover Zabbix and Prometheus Grafana", MonitoringArtifactsCoverZabbixAndPrometheusGrafana),
     ("worker stop waits for active sync run", WorkerStopWaitsForActiveRun),
     ("worker stop cancels after grace period", WorkerStopCancelsAfterGracePeriod)
 };
@@ -235,9 +244,32 @@ static async Task DevelopmentHealthAndReadinessEndpointsWorkWithoutDependencies(
     }
 }
 
+static async Task RuntimeEndpointResponsesMatchOpenApiRequiredFields()
+{
+    var port = GetFreeTcpPort();
+    var env = NewServiceEnvironment("Development", port);
+    env["Readiness__CheckDependencies"] = "false";
+
+    await using var service = ServiceProcessHandle.Start(env);
+    await WaitForHttpOkAsync(service, $"http://127.0.0.1:{port}/health", TimeSpan.FromSeconds(8), "OpenAPI runtime /health");
+
+    using var contract = JsonDocument.Parse(File.ReadAllText(OperationalOpenApiContractPath()));
+    var schemas = contract.RootElement.GetProperty("components").GetProperty("schemas");
+
+    using var health = await GetServiceJsonAsync($"http://127.0.0.1:{port}/health");
+    AssertJsonHasRequiredProperties(health.RootElement, schemas.GetProperty("HealthResponse"), "/health response");
+    AssertJsonHasRequiredProperties(health.RootElement.GetProperty("sync"), schemas.GetProperty("SyncStatus"), "/health sync response");
+
+    using var readiness = await GetServiceJsonAsync($"http://127.0.0.1:{port}/ready");
+    AssertJsonHasRequiredProperties(readiness.RootElement, schemas.GetProperty("ReadinessResponse"), "/ready response");
+
+    using var status = await GetServiceJsonAsync($"http://127.0.0.1:{port}/sync/status");
+    AssertJsonHasRequiredProperties(status.RootElement, schemas.GetProperty("SyncStatus"), "/sync/status response");
+}
+
 static Task OperationalOpenApiContractDescribesRuntimeEndpoints()
 {
-    var contractPath = Path.Combine(FindRepoRoot(), "aa", "contracts", "operational-api.openapi.json");
+    var contractPath = OperationalOpenApiContractPath();
     AssertTrue(File.Exists(contractPath), "operational OpenAPI contract should exist");
 
     using var contract = JsonDocument.Parse(File.ReadAllText(contractPath));
@@ -255,6 +287,17 @@ static Task OperationalOpenApiContractDescribesRuntimeEndpoints()
     AssertRequiredProperties(schemas.GetProperty("ReadinessResponse"), ["service", "status", "dependenciesChecked"], "ReadinessResponse");
     AssertRequiredProperties(schemas.GetProperty("SyncStatus"), ["isRunning", "lastStartedUtc", "lastCompletedUtc", "lastSucceeded", "lastError", "lastSummary"], "SyncStatus");
     AssertRequiredProperties(schemas.GetProperty("SyncRunSummary"), ["adUsers", "provisionedUsers", "createdUsers", "updatedUsers", "disabledUsers", "skippedUsers", "failedUsers", "dryRun", "hasFailures"], "SyncRunSummary");
+    return Task.CompletedTask;
+}
+
+static Task DockerfileEnforcesNonRootRuntimePolicy()
+{
+    var dockerfile = File.ReadAllText(Path.Combine(FindRepoRoot(), "deploy", "dockerfiles", "adgroups2cmdbuild.Dockerfile"));
+    AssertTextContains(dockerfile, "groupadd --system --gid 64100 ad2cmdb", "Docker group policy");
+    AssertTextContains(dockerfile, "useradd --system --uid 64100 --gid ad2cmdb", "Docker user policy");
+    AssertTextContains(dockerfile, "mkdir -p /app/state", "Docker state directory");
+    AssertTextContains(dockerfile, "COPY --from=build --chown=ad2cmdb:ad2cmdb", "Docker copy ownership");
+    AssertTextContains(dockerfile, "USER ad2cmdb", "Docker non-root user");
     return Task.CompletedTask;
 }
 
@@ -536,6 +579,120 @@ static Task ElkLoggingOptionsValidateActiveSink()
     return Task.CompletedTask;
 }
 
+static async Task ElkLoggerSendsStructuredHttpEvent()
+{
+    await using var server = await SingleRequestHttpServer.StartAsync(_ => """{"result":"created"}""");
+    using (var provider = new ElkLoggerProvider(Options.Create(new ElkLoggingOptions
+    {
+        Enabled = true,
+        Endpoint = server.BaseUrl,
+        Index = "adgroups2cmdbuild-test",
+        ApiKey = "test-api-key",
+        MinimumLevel = "Information",
+        ServiceName = "adgroups2cmdbuild-test",
+        Environment = "Test",
+        TimeoutMs = 2000,
+        QueueCapacity = 10,
+        FlushTimeoutMs = 3000
+    })))
+    {
+        var logger = provider.CreateLogger("test.category");
+        logger.LogInformation(new EventId(7, "SyncStarted"), "hello {Login}", "alice");
+    }
+
+    var request = await server.WaitForRequestAsync(TimeSpan.FromSeconds(3), "ELK log HTTP request");
+    AssertEqual("POST", request.Method, "ELK method");
+    AssertEqual("/adgroups2cmdbuild-test/_doc", request.Path, "ELK endpoint path");
+    AssertTextContains(request.Headers.GetValueOrDefault("authorization") ?? "", "ApiKey test-api-key", "ELK authorization");
+
+    using var document = JsonDocument.Parse(request.Body);
+    var root = document.RootElement;
+    AssertEqual("Information", root.GetProperty("level").GetString(), "ELK level");
+    AssertEqual("test.category", root.GetProperty("category").GetString(), "ELK category");
+    AssertEqual(7, root.GetProperty("eventId").GetInt32(), "ELK event id");
+    AssertEqual("SyncStarted", root.GetProperty("eventName").GetString(), "ELK event name");
+    AssertEqual("hello alice", root.GetProperty("message").GetString(), "ELK message");
+    AssertEqual("adgroups2cmdbuild-test", root.GetProperty("service").GetString(), "ELK service");
+    AssertEqual("Test", root.GetProperty("environment").GetString(), "ELK environment");
+}
+
+static async Task SecretResolverHandlesCompanionReferencesAndPamCompatibility()
+{
+    await WithEnvironmentAsync(
+        new Dictionary<string, string?>
+        {
+            ["PAMURL"] = null,
+            ["PAMTOKEN"] = null,
+            ["PAMUSERNAME"] = null,
+            ["PAMPASSWORD"] = null,
+            ["PAMDEFAULTACCOUNTPATH"] = null
+        },
+        async () =>
+        {
+            var companionConfig = new ConfigurationManager();
+            companionConfig.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Secrets:Provider"] = "None",
+                ["Cmdbuild:Password"] = "",
+                ["Cmdbuild:PasswordSecret"] = "AAA.LOCAL/PROD/cmdbuild-sync"
+            });
+
+            await AssertThrowsAsync<InvalidOperationException>(
+                () => companionConfig.ResolveSecretReferencesAsync("adgroups2cmdbuild-test"),
+                "Secrets:Provider is 'None'");
+            AssertEqual("secret://AAA.LOCAL/PROD/cmdbuild-sync", companionConfig["Cmdbuild:Password"], "companion secret reference");
+        });
+
+    await WithEnvironmentAsync(
+        new Dictionary<string, string?>
+        {
+            ["PAMURL"] = "https://pam.example.local",
+            ["PAMTOKEN"] = "compat-token",
+            ["PAMDEFAULTACCOUNTPATH"] = "AAA.LOCAL/PROD"
+        },
+        async () =>
+        {
+            var pamConfig = new ConfigurationManager();
+            pamConfig.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Secrets:Provider"] = "None"
+            });
+            await pamConfig.ResolveSecretReferencesAsync("adgroups2cmdbuild-test");
+            AssertEqual("IndeedPamAapm", pamConfig["Secrets:Provider"], "PAM provider auto-detect");
+            AssertEqual("https://pam.example.local", pamConfig["Secrets:IndeedPamAapm:BaseUrl"], "PAM base URL");
+            AssertEqual("compat-token", pamConfig["Secrets:IndeedPamAapm:ApplicationToken"], "PAM token");
+            AssertEqual("AAA.LOCAL/PROD", pamConfig["Secrets:IndeedPamAapm:DefaultAccountPath"], "PAM default account path");
+        });
+}
+
+static async Task SecretResolverResolvesIndeedPamAapmHttpResponse()
+{
+    await using var server = await SingleRequestHttpServer.StartAsync(_ => """{"password":"resolved-secret"}""");
+    var config = new ConfigurationManager();
+    config.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["Secrets:Provider"] = "IndeedPamAapm",
+        ["Secrets:IndeedPamAapm:BaseUrl"] = server.BaseUrl,
+        ["Secrets:IndeedPamAapm:PasswordEndpointPath"] = "/aapm/password",
+        ["Secrets:IndeedPamAapm:ApplicationToken"] = "app-token",
+        ["Secrets:IndeedPamAapm:ResponseType"] = "json",
+        ["Secrets:IndeedPamAapm:ValueJsonPath"] = "password",
+        ["Secrets:IndeedPamAapm:Comment"] = "ad2cmdb {service} {secretId}",
+        ["Cmdbuild:Password"] = "secret://AAA_LOCAL/PROD/cmdbuild-sync"
+    });
+
+    await config.ResolveSecretReferencesAsync("adgroups2cmdbuild-test");
+    var request = await server.WaitForRequestAsync(TimeSpan.FromSeconds(3), "PAM secret HTTP request");
+
+    AssertEqual("resolved-secret", config["Cmdbuild:Password"], "resolved CMDBuild secret");
+    AssertEqual("GET", request.Method, "PAM method");
+    AssertEqual("/aapm/password", request.Path, "PAM endpoint path");
+    AssertTextContains(request.Query, "token=app-token", "PAM token query");
+    AssertTextContains(Uri.UnescapeDataString(request.Query), "sapmaccountpath=AAA_LOCAL/PROD", "PAM account path query");
+    AssertTextContains(request.Query, "sapmaccountname=cmdbuild-sync", "PAM account name query");
+    AssertTextContains(Uri.UnescapeDataString(request.Query), "comment=ad2cmdb adgroups2cmdbuild-test AAA_LOCAL/PROD/cmdbuild-sync", "PAM comment query");
+}
+
 static async Task BootstrapToolHelpWorks()
 {
     var result = await RunProcessAsync(
@@ -630,6 +787,40 @@ static Task BootstrapNamingLogicEscapesAndRejectsUnsafeValues()
         @"CN=\#Role\,One\ ,OU=Groups,DC=example,DC=local",
         BootstrapAdGroups.BootstrapAdGroupsLogic.BuildGroupDn("#Role,One ", "OU=Groups,DC=example,DC=local"),
         "escaped group DN");
+    return Task.CompletedTask;
+}
+
+static Task MonitoringArtifactsCoverZabbixAndPrometheusGrafana()
+{
+    var root = FindRepoRoot();
+    var monitoringDirectory = Path.Combine(root, "aa", "monitoring");
+    var expectedFiles = new[]
+    {
+        "README.md",
+        "zabbix-adgroups2cmdbuild-template.yaml",
+        "prometheus-json-exporter-adgroups2cmdbuild.yaml",
+        "prometheus-adgroups2cmdbuild-rules.yaml",
+        "grafana-adgroups2cmdbuild-dashboard.json"
+    };
+
+    foreach (var fileName in expectedFiles)
+    {
+        AssertTrue(File.Exists(Path.Combine(monitoringDirectory, fileName)), $"monitoring artifact should exist: {fileName}");
+    }
+
+    var zabbix = File.ReadAllText(Path.Combine(monitoringDirectory, "zabbix-adgroups2cmdbuild-template.yaml"));
+    AssertTextContains(zabbix, "{$AD2CMDB.URL}", "Zabbix service URL macro");
+    AssertTextContains(zabbix, "ad2cmdb.ready.body", "Zabbix readiness item");
+    AssertTextContains(zabbix, "ad2cmdb.sync.failed_users", "Zabbix failed users item");
+
+    var prometheusRules = File.ReadAllText(Path.Combine(monitoringDirectory, "prometheus-adgroups2cmdbuild-rules.yaml"));
+    AssertTextContains(prometheusRules, "Ad2CmdbReadinessDown", "Prometheus readiness alert");
+    AssertTextContains(prometheusRules, "Ad2CmdbSyncStale", "Prometheus stale sync alert");
+    AssertTextContains(prometheusRules, "Ad2CmdbPartialFailures", "Prometheus partial failure alert");
+
+    using var dashboard = JsonDocument.Parse(File.ReadAllText(Path.Combine(monitoringDirectory, "grafana-adgroups2cmdbuild-dashboard.json")));
+    AssertEqual("adgroups2cmdbuild operations", dashboard.RootElement.GetProperty("title").GetString(), "Grafana dashboard title");
+    AssertTrue(dashboard.RootElement.GetProperty("panels").GetArrayLength() >= 4, "Grafana dashboard panels");
     return Task.CompletedTask;
 }
 
@@ -963,6 +1154,11 @@ static string FindRepoRoot()
     throw new InvalidOperationException("repo root was not found");
 }
 
+static string OperationalOpenApiContractPath()
+{
+    return Path.Combine(FindRepoRoot(), "aa", "contracts", "operational-api.openapi.json");
+}
+
 static async Task<ProcessResult> RunProcessAsync(
     string fileName,
     string arguments,
@@ -1024,6 +1220,28 @@ static async Task WaitAsync(Task task, TimeSpan timeout, string operation)
     }
 }
 
+static async Task WithEnvironmentAsync(IReadOnlyDictionary<string, string?> values, Func<Task> action)
+{
+    var previous = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+    foreach (var item in values)
+    {
+        previous[item.Key] = Environment.GetEnvironmentVariable(item.Key);
+        Environment.SetEnvironmentVariable(item.Key, item.Value);
+    }
+
+    try
+    {
+        await action();
+    }
+    finally
+    {
+        foreach (var item in previous)
+        {
+            Environment.SetEnvironmentVariable(item.Key, item.Value);
+        }
+    }
+}
+
 static async Task AssertThrowsAsync<TException>(Func<Task> action, string expectedMessage)
     where TException : Exception
 {
@@ -1075,6 +1293,20 @@ static void AssertRequiredProperties(JsonElement schema, IReadOnlyCollection<str
     foreach (var property in expectedProperties)
     {
         AssertTrue(required.Contains(property), $"{schemaName} should require {property}");
+    }
+}
+
+static void AssertJsonHasRequiredProperties(JsonElement json, JsonElement schema, string name)
+{
+    var required = schema.GetProperty("required")
+        .EnumerateArray()
+        .Select(item => item.GetString())
+        .Where(item => !string.IsNullOrWhiteSpace(item))
+        .ToArray();
+
+    foreach (var property in required)
+    {
+        AssertTrue(json.TryGetProperty(property!, out _), $"{name} should include required property {property}");
     }
 }
 
@@ -1276,6 +1508,110 @@ internal sealed class SequenceHttpHandler(params Func<HttpRequestMessage, HttpRe
     }
 }
 
+internal sealed class SingleRequestHttpServer : IAsyncDisposable
+{
+    private readonly TcpListener listener;
+    private readonly Func<CapturedHttpRequest, string> responseFactory;
+    private readonly Task<CapturedHttpRequest> requestTask;
+
+    private SingleRequestHttpServer(TcpListener listener, Func<CapturedHttpRequest, string> responseFactory)
+    {
+        this.listener = listener;
+        this.responseFactory = responseFactory;
+        BaseUrl = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
+        requestTask = AcceptOnceAsync();
+    }
+
+    public string BaseUrl { get; }
+
+    public static Task<SingleRequestHttpServer> StartAsync(Func<CapturedHttpRequest, string> responseFactory)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return Task.FromResult(new SingleRequestHttpServer(listener, responseFactory));
+    }
+
+    public async Task<CapturedHttpRequest> WaitForRequestAsync(TimeSpan timeout, string operation)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            return await requestTask.WaitAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new InvalidOperationException($"{operation} timed out");
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        listener.Stop();
+        return ValueTask.CompletedTask;
+    }
+
+    private async Task<CapturedHttpRequest> AcceptOnceAsync()
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+
+        var requestLine = await reader.ReadLineAsync() ?? "";
+        var requestParts = requestLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        var method = requestParts.Length > 0 ? requestParts[0] : "";
+        var rawTarget = requestParts.Length > 1 ? requestParts[1] : "/";
+        var target = rawTarget.Split('?', 2);
+        var path = target[0];
+        var query = target.Length > 1 ? target[1] : "";
+
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? line;
+        while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync()))
+        {
+            var separator = line.IndexOf(':');
+            if (separator > 0)
+            {
+                headers[line[..separator].Trim()] = line[(separator + 1)..].Trim();
+            }
+        }
+
+        var contentLength = headers.TryGetValue("Content-Length", out var contentLengthText)
+            && int.TryParse(contentLengthText, out var parsedContentLength)
+            ? parsedContentLength
+            : 0;
+        var body = "";
+        if (contentLength > 0)
+        {
+            var buffer = new char[contentLength];
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var count = await reader.ReadAsync(buffer.AsMemory(read, buffer.Length - read));
+                if (count == 0)
+                {
+                    break;
+                }
+
+                read += count;
+            }
+
+            body = new string(buffer, 0, read);
+        }
+
+        var captured = new CapturedHttpRequest(method, path, query, headers, body);
+        var responseBody = responseFactory(captured);
+        var responseBytes = Encoding.UTF8.GetBytes(responseBody);
+        var responseHeader = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 200 OK\r\n"
+            + "Content-Type: application/json\r\n"
+            + $"Content-Length: {responseBytes.Length}\r\n"
+            + "Connection: close\r\n\r\n");
+        await stream.WriteAsync(responseHeader);
+        await stream.WriteAsync(responseBytes);
+        return captured;
+    }
+}
+
 internal sealed class ServiceProcessHandle : IAsyncDisposable
 {
     private readonly StringBuilder output = new();
@@ -1417,5 +1753,12 @@ internal sealed record CapturedRequest(
     string? AuthorizationParameter,
     string? CmdbuildView,
     string? Body);
+
+internal sealed record CapturedHttpRequest(
+    string Method,
+    string Path,
+    string Query,
+    IReadOnlyDictionary<string, string> Headers,
+    string Body);
 
 internal sealed record ProcessResult(int ExitCode, string Output);

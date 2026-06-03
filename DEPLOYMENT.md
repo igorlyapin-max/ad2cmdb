@@ -371,7 +371,19 @@ docker run -d \
 
 Если один пользователь не применился в CMDBuild, run продолжается. В `/sync/status` это видно как `lastSucceeded=false` и `lastSummary.failedUsers > 0`; смотрите error log по конкретному login и повторите sync после исправления причины.
 
-## 13. Rollback
+## 13. Monitoring Artifacts
+
+Для Zabbix используйте `aa/monitoring/zabbix-adgroups2cmdbuild-template.yaml` и задайте macro `{$AD2CMDB.URL}` на base URL сервиса.
+
+Для Prometheus/Grafana используйте:
+
+- `aa/monitoring/prometheus-json-exporter-adgroups2cmdbuild.yaml`;
+- `aa/monitoring/prometheus-adgroups2cmdbuild-rules.yaml`;
+- `aa/monitoring/grafana-adgroups2cmdbuild-dashboard.json`.
+
+Проверяемые сигналы: `/health`, `/ready`, stale sync, failed sync и `lastSummary.failedUsers`.
+
+## 14. Rollback
 
 Если сервис еще в dry-run, rollback не нужен.
 
@@ -389,7 +401,7 @@ docker run -d \
 
 Bootstrap tool не удаляет AD groups. Если группа создана ошибочно, удаление выполняется отдельной AD admin процедурой.
 
-## 14. Обязательные Проверки Перед Релизом
+## 15. Обязательные Проверки Перед Релизом
 
 ```bash
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal

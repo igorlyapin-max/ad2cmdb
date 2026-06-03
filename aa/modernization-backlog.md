@@ -40,18 +40,16 @@ Inspected areas:
 | --- | --- | --- | --- | --- |
 | MOD-P2-001 | P2 | Docker runtime image runs as root. | `deploy/dockerfiles/adgroups2cmdbuild.Dockerfile`. | Runtime stage now creates non-root `ad2cmdb` user/group with UID/GID `64100`, owns `/app/state`, and runs the service as `USER ad2cmdb`. |
 | MOD-P2-002 | P2 | Operational API contract is documented in Markdown but not machine-readable. | `/health`, `/ready`, `/sync/status`. | Added `aa/contracts/operational-api.openapi.json` and a contract test that checks endpoint responses and required response schemas. |
+| MOD-P2-003 | P2 | Alert/dashboard definitions are recommendations only. | `aa/maps/observability-map.md`. | Added deployable Zabbix template, Prometheus json_exporter config, Prometheus alert rules, and Grafana dashboard artifacts under `aa/monitoring/`. |
 | MOD-P2-004 | P2 | Bootstrap tool lacks retry/backoff for transient CMDBuild/LDAP failures. | `tools/bootstrap-ad-groups/Program.cs`. | Added bounded retry/backoff around CMDBuild role reads plus AD bind/search/create operations and extracted deterministic bootstrap naming/selection logic for tests. |
 | MOD-P3-001 | P3 | Documentation versioning is manual. | Root and `aa/` documentation. | Decision recorded: documentation version remains explicit and release-coupled for now; automation is deferred until release tagging/publishing is formalized. |
 
 ## Remaining Backlog
 
-| ID | Priority | Gap | Next action |
-| --- | --- | --- | --- |
-| MOD-P2-003 | P2 | Alert/dashboard definitions are recommendations only. | Add deployable alert rules or platform-specific dashboard artifacts when target monitoring platform is known. |
+No remaining P0/P1/P2/P3 modernization backlog items are open for the current target.
 
 ## Accepted Risk
 
-The file-based state store remains accepted for this iteration because the service is explicitly documented for one active replica only.
-Active-active operation requires a shared durable state design and is not part of this pass.
-
-Deployable monitoring artifacts remain open because the target monitoring platform and rule format are not defined yet.
+- The file-based state store remains accepted for this iteration because the service is explicitly documented for one active replica only.
+- Active-active operation requires a shared durable state design and is not part of this pass.
+- Automated tests use behavior/contract coverage instead of line percentage tooling; external AD/CMDBuild/PAM/Zabbix behavior remains covered by documented smoke checks.

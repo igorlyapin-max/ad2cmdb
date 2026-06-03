@@ -1,0 +1,52 @@
+groups:
+  - name: adgroups2cmdbuild
+    rules:
+      - alert: Ad2CmdbHealthDown
+        expr: probe_success{job="adgroups2cmdbuild-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: adgroups2cmdbuild
+        annotations:
+          summary: adgroups2cmdbuild health endpoint is unavailable
+          description: The /health probe has failed for more than 2 minutes.
+
+      - alert: Ad2CmdbReadinessDown
+        expr: probe_success{job="adgroups2cmdbuild-ready"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: adgroups2cmdbuild
+        annotations:
+          summary: adgroups2cmdbuild readiness endpoint is unavailable
+          description: The /ready probe has failed for more than 2 minutes.
+
+      - alert: Ad2CmdbSyncStale
+        expr: time() - ad2cmdb_sync_last_completed_timestamp_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+          service: adgroups2cmdbuild
+        annotations:
+          summary: adgroups2cmdbuild sync status is stale
+          description: The last completed sync is older than 15 minutes.
+
+      - alert: Ad2CmdbLastSyncFailed
+        expr: ad2cmdb_sync_last_succeeded == 0
+        for: 1m
+        labels:
+          severity: warning
+          service: adgroups2cmdbuild
+        annotations:
+          summary: adgroups2cmdbuild last sync failed
+          description: The latest sync run reported lastSucceeded=false.
+
+      - alert: Ad2CmdbPartialFailures
+        expr: ad2cmdb_sync_failed_users > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: adgroups2cmdbuild
+        annotations:
+          summary: adgroups2cmdbuild sync has partial user failures
+          description: At least one user operation failed in the latest sync run.

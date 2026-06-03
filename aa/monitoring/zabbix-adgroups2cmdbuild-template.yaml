@@ -1,0 +1,123 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 7ec3c3d723df4f8aa7677df4aa0ad2cd
+      name: Templates/Applications
+  templates:
+    - uuid: d1289d8867b54c5a9a1f4f0b944d2c2b
+      template: Template App adgroups2cmdbuild
+      name: Template App adgroups2cmdbuild
+      description: HTTP checks and sync status monitoring for adgroups2cmdbuild.
+      groups:
+        - name: Templates/Applications
+      macros:
+        - macro: '{$AD2CMDB.URL}'
+          value: http://adgroups2cmdbuild:8080
+          description: Base URL of the adgroups2cmdbuild service.
+        - macro: '{$AD2CMDB.HTTP.TIMEOUT}'
+          value: 5s
+          description: HTTP timeout for operational API checks.
+        - macro: '{$AD2CMDB.STALE.SECONDS}'
+          value: '900'
+          description: Maximum allowed age of the last completed sync run.
+      items:
+        - uuid: 979adfd0ed5142cd898c21e34fb11f11
+          name: Health body
+          type: HTTP_AGENT
+          key: ad2cmdb.health.body
+          value_type: TEXT
+          url: '{$AD2CMDB.URL}/health'
+          timeout: '{$AD2CMDB.HTTP.TIMEOUT}'
+        - uuid: 1f4f5cbe905b4e01b723b2b4e0c4258b
+          name: Readiness body
+          type: HTTP_AGENT
+          key: ad2cmdb.ready.body
+          value_type: TEXT
+          url: '{$AD2CMDB.URL}/ready'
+          timeout: '{$AD2CMDB.HTTP.TIMEOUT}'
+        - uuid: c8b2d5c0628c4c0e8cbb6c6c23f3a5d0
+          name: Sync status body
+          type: HTTP_AGENT
+          key: ad2cmdb.sync.status.body
+          value_type: TEXT
+          url: '{$AD2CMDB.URL}/sync/status'
+          timeout: '{$AD2CMDB.HTTP.TIMEOUT}'
+        - uuid: 707e4bdcf70248e79d2e72992e57cf94
+          name: Readiness status
+          type: DEPENDENT
+          key: ad2cmdb.ready.status
+          value_type: CHAR
+          master_item:
+            key: ad2cmdb.ready.body
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.status
+        - uuid: d95b376b4b544f76a7a88f63363d5d6e
+          name: Sync failed users
+          type: DEPENDENT
+          key: ad2cmdb.sync.failed_users
+          value_type: UNSIGNED
+          master_item:
+            key: ad2cmdb.sync.status.body
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.lastSummary.failedUsers
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  return value === null || value === '' || value === 'null' ? 0 : Number(value);
+        - uuid: 5b83fd849c2841a0a3e9f0cf0c0c7d85
+          name: Sync last succeeded
+          type: DEPENDENT
+          key: ad2cmdb.sync.last_succeeded
+          value_type: CHAR
+          master_item:
+            key: ad2cmdb.sync.status.body
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.lastSucceeded
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  return value === null || value === '' || value === 'null' ? 'unknown' : String(value);
+        - uuid: 4d27cd88992f4113a5c9fc1f7b88baf1
+          name: Sync last completed age seconds
+          type: DEPENDENT
+          key: ad2cmdb.sync.last_completed_age_seconds
+          value_type: UNSIGNED
+          master_item:
+            key: ad2cmdb.sync.status.body
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.lastCompletedUtc
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  if (value === null || value === '' || value === 'null') return 2147483647;
+                  var timestamp = Date.parse(value);
+                  return Number.isNaN(timestamp) ? 2147483647 : Math.floor((Date.now() - timestamp) / 1000);
+      triggers:
+        - uuid: 4a865f5e3f5d4ffdb00e69cfe7cfe4c4
+          expression: 'nodata(/Template App adgroups2cmdbuild/ad2cmdb.health.body,3m)=1'
+          name: adgroups2cmdbuild health endpoint has no data
+          priority: HIGH
+        - uuid: d0d13b2fef404fe69e02541fbe2b5e9d
+          expression: 'last(/Template App adgroups2cmdbuild/ad2cmdb.ready.status)<>"ready"'
+          name: adgroups2cmdbuild readiness is not ready
+          priority: HIGH
+        - uuid: 671309a8ef164e7db40bb3f580d8f8c4
+          expression: 'last(/Template App adgroups2cmdbuild/ad2cmdb.sync.failed_users)>0'
+          name: adgroups2cmdbuild sync has partial user failures
+          priority: WARNING
+        - uuid: f591bda465b043e898cd1a7a9363aa0a
+          expression: 'last(/Template App adgroups2cmdbuild/ad2cmdb.sync.last_completed_age_seconds)>{$AD2CMDB.STALE.SECONDS}'
+          name: adgroups2cmdbuild sync status is stale
+          priority: WARNING
+        - uuid: d364cc7aa7e44c80a5c3d7c4c7a142a5
+          expression: 'last(/Template App adgroups2cmdbuild/ad2cmdb.sync.last_succeeded)="false"'
+          name: adgroups2cmdbuild last sync failed
+          priority: AVERAGE

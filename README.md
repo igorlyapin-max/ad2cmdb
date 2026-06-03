@@ -5,6 +5,7 @@
 Architecture artifacts are stored in [aa/](aa/README.md).
 Russian deployment instructions are in [DEPLOYMENT.md](DEPLOYMENT.md).
 The machine-readable operational API contract is [aa/contracts/operational-api.openapi.json](aa/contracts/operational-api.openapi.json).
+Monitoring artifacts for Zabbix and Prometheus/Grafana are stored in [aa/monitoring/](aa/monitoring/README.md).
 
 Behavior:
 - every configured AD group is expected to have the same name as a CMDBuild role;

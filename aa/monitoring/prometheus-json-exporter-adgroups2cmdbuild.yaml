@@ -1,0 +1,26 @@
+modules:
+  adgroups2cmdbuild_sync_status:
+    headers:
+      Accept: application/json
+    metrics:
+      - name: ad2cmdb_sync_running
+        path: '{ .isRunning }'
+        type: value
+        help: Whether adgroups2cmdbuild has an active sync run.
+        valuetype: gauge
+      - name: ad2cmdb_sync_last_succeeded
+        path: '{ .lastSucceeded }'
+        type: value
+        help: Whether the last sync run succeeded.
+        valuetype: gauge
+      - name: ad2cmdb_sync_failed_users
+        path: '{ .lastSummary.failedUsers }'
+        type: value
+        help: Number of users that failed during the last sync run.
+        valuetype: gauge
+      - name: ad2cmdb_sync_last_completed_timestamp_seconds
+        path: '{ .lastCompletedUtc }'
+        type: value
+        help: Unix timestamp of the last completed sync run.
+        valuetype: gauge
+        epochTimestamp: true

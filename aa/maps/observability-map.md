@@ -10,6 +10,14 @@
 | OBS-004 | Host log agent | Filebeat/Vector/Fluent Bit | Если ELK/центральный collector собирает Docker container logs с узла | Рекомендуемый вариант для платформенной эксплуатации |
 | OBS-005 | Sidecar collector | Отдельный контейнер | Если нужна изоляция сборщика логов рядом с сервисом | Полезно в orchestrator-сценариях |
 
+## Monitoring Artifacts
+
+| Platform | Artifact | Signals |
+| --- | --- | --- |
+| Zabbix | `aa/monitoring/zabbix-adgroups2cmdbuild-template.yaml` | `/health`, `/ready`, `failedUsers`, `lastSucceeded`, stale `lastCompletedUtc` |
+| Prometheus | `aa/monitoring/prometheus-json-exporter-adgroups2cmdbuild.yaml`; `aa/monitoring/prometheus-adgroups2cmdbuild-rules.yaml` | blackbox `/health`/`/ready`, json_exporter `/sync/status`, stale/failed/partial alerts |
+| Grafana | `aa/monitoring/grafana-adgroups2cmdbuild-dashboard.json` | Health, readiness, last sync age, failed users, last sync success |
+
 ## Debug Levels
 
 | Level | Alias | Содержимое |

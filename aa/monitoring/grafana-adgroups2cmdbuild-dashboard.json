@@ -1,0 +1,92 @@
+{
+  "title": "adgroups2cmdbuild operations",
+  "tags": [
+    "ad2cmdb",
+    "adgroups2cmdbuild"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Health",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "probe_success{job=\"adgroups2cmdbuild-health\"}",
+          "legendFormat": "health"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Readiness",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "probe_success{job=\"adgroups2cmdbuild-ready\"}",
+          "legendFormat": "ready"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Last Sync Age",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "time() - ad2cmdb_sync_last_completed_timestamp_seconds",
+          "legendFormat": "seconds"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Failed Users",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "ad2cmdb_sync_failed_users",
+          "legendFormat": "failed users"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Last Sync Succeeded",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "ad2cmdb_sync_last_succeeded",
+          "legendFormat": "last succeeded"
+        }
+      ]
+    }
+  ]
+}

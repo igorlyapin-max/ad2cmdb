@@ -15,6 +15,8 @@
 - Added OpenAPI contract for `/health`, `/ready`, and `/sync/status`.
 - Added transient retry/backoff to `bootstrap-ad-groups` CMDBuild role reads and LDAP bind/search/create operations.
 - Extracted deterministic bootstrap AD group selection and naming logic for focused tests.
+- Added Zabbix and Prometheus/Grafana monitoring artifacts for health, readiness, stale sync, failed sync, and partial failures.
+- Expanded the local test harness with secret-resolution, ELK sink, Dockerfile policy, OpenAPI runtime consistency, and monitoring artifact checks.
 - Fixed one verbose AD debug log path that emitted a raw login despite default sensitive-value redaction.
 - Added `/ready` readiness endpoint and fixed-window rate limiting for status endpoints.
 - Added GitLab CI and a lightweight local test harness.

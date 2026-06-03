@@ -21,6 +21,8 @@ CMDBuild является целевой системой.
 | `deploy/dockerfiles/adgroups2cmdbuild.Dockerfile` | Docker image сервиса |
 | `aa/` | Архитектурные артефакты, карты конфигурации, health, secrets и observability |
 | `aa/contracts/operational-api.openapi.json` | Машиночитаемый OpenAPI contract для `/health`, `/ready`, `/sync/status` |
+| `aa/monitoring/` | Zabbix и Prometheus/Grafana artifacts для health/readiness/sync monitoring |
+| `aa/test-coverage.md` | Карта покрытия автотестами и ручными smoke checks |
 | `tests/adgroups2cmdbuild.tests` | Легкий test harness без внешних NuGet test packages |
 | `state/` | Runtime state, не коммитится |
 
@@ -68,6 +70,18 @@ Mounted state volume должен быть writable для этого польз
 
 Для `/health`, `/ready` и `/sync/status` включен fixed-window rate limit через `EndpointRateLimiting`.
 Машиночитаемый contract endpoint-ов находится в `aa/contracts/operational-api.openapi.json`.
+
+## Monitoring Artifacts
+
+Для rollout monitoring подготовлены artifacts:
+
+- `aa/monitoring/zabbix-adgroups2cmdbuild-template.yaml`;
+- `aa/monitoring/prometheus-json-exporter-adgroups2cmdbuild.yaml`;
+- `aa/monitoring/prometheus-adgroups2cmdbuild-rules.yaml`;
+- `aa/monitoring/grafana-adgroups2cmdbuild-dashboard.json`.
+
+Artifacts покрывают `/health`, `/ready`, stale sync, failed sync и partial failures.
+Порог stale sync по умолчанию рассчитан на `Sync:IntervalSeconds=300`.
 
 ## Security Baseline
 
