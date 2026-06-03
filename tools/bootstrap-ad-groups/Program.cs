@@ -1,9 +1,13 @@
 using System.DirectoryServices.Protocols;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using AdGroups2Cmdbuild.Configuration;
+using AdGroups2Cmdbuild.Resilience;
 using AdGroups2Cmdbuild.Secrets;
+using BootstrapAdGroups;
 using Microsoft.Extensions.Configuration;
 
 var cli = BootstrapCli.Parse(args);
@@ -26,7 +30,7 @@ await configuration.ResolveSecretReferencesAsync("bootstrap-ad-groups");
 var adOptions = ReadAdOptions(configuration);
 var cmdbOptions = ReadCmdbuildOptions(configuration);
 var options = ReadBootstrapOptions(configuration);
-ValidateOptions(adOptions, cmdbOptions, options);
+ValidateOptions(adOptions, cmdbOptions, options, environment);
 
 using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(options.TimeoutMs));
 var roles = await ReadCmdbuildRolesAsync(cmdbOptions, cancellation.Token);
@@ -44,13 +48,25 @@ if (options.Apply && options.RequireExplicitSelectionForApply && !options.All &&
 }
 
 using var ldap = CreateLdapConnection(adOptions);
-ldap.Bind();
+await ExecuteAdWithRetryAsync(
+    adOptions,
+    "LDAP bind",
+    token => Task.Run(() =>
+    {
+        ldap.Bind();
+        return true;
+    }, token),
+    cancellation.Token);
 
 var plan = new List<GroupPlanItem>();
 foreach (var role in selectedRoles.OrderBy(role => role.Name, StringComparer.OrdinalIgnoreCase))
 {
-    var existingDn = FindExistingGroupDn(ldap, adOptions, role.Name);
-    plan.Add(new GroupPlanItem(role.Name, existingDn, BuildGroupDn(role.Name, options.TargetOuDn), existingDn is null));
+    var existingDn = await FindExistingGroupDnAsync(ldap, adOptions, role.Name, cancellation.Token);
+    plan.Add(new GroupPlanItem(
+        role.Name,
+        existingDn,
+        BootstrapAdGroupsLogic.BuildGroupDn(role.Name, options.TargetOuDn),
+        existingDn is null));
 }
 
 PrintPlan(plan, options.Apply);
@@ -62,7 +78,7 @@ if (!options.Apply)
 
 foreach (var item in plan.Where(item => item.ShouldCreate))
 {
-    CreateGroup(ldap, item.Name, item.TargetDn, options);
+    await CreateGroupAsync(ldap, adOptions, item.Name, item.TargetDn, options, cancellation.Token);
     Console.WriteLine($"created: {item.Name} -> {item.TargetDn}");
 }
 
@@ -82,23 +98,33 @@ static async Task<IReadOnlyList<CmdbuildRole>> ReadCmdbuildRolesAsync(
     var offset = 0;
     while (true)
     {
-        using var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"{options.BaseUrl.TrimEnd('/')}/roles?limit={options.RolesPageSize}&offset={offset}&detailed=true");
-        request.Headers.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(Encoding.UTF8.GetBytes($"{options.Username}:{options.Password}")));
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.Add("CMDBuild-View", "admin");
+        using var document = await ExecuteCmdbuildWithRetryAsync(
+            options,
+            $"CMDBuild roles page offset={offset}",
+            async token =>
+            {
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"{options.BaseUrl.TrimEnd('/')}/roles?limit={options.RolesPageSize}&offset={offset}&detailed=true");
+                request.Headers.Authorization = new AuthenticationHeaderValue(
+                    "Basic",
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes($"{options.Username}:{options.Password}")));
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Headers.Add("CMDBuild-View", "admin");
 
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        var text = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new HttpRequestException($"CMDBuild roles request failed with HTTP {(int)response.StatusCode}: {text}");
-        }
+                using var response = await httpClient.SendAsync(request, token);
+                var text = await response.Content.ReadAsStringAsync(token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new HttpRequestException(
+                        $"CMDBuild roles request failed with HTTP {(int)response.StatusCode}: {text}",
+                        null,
+                        response.StatusCode);
+                }
 
-        using var document = JsonDocument.Parse(text);
+                return JsonDocument.Parse(text);
+            },
+            cancellationToken);
         var page = ReadDataArray(document.RootElement).ToArray();
         foreach (var item in page)
         {
@@ -130,32 +156,19 @@ static async Task<IReadOnlyList<CmdbuildRole>> ReadCmdbuildRolesAsync(
 
 static List<CmdbuildRole> SelectRoles(IReadOnlyList<CmdbuildRole> roles, BootstrapOptions options)
 {
-    IEnumerable<CmdbuildRole> selected = roles;
-    if (!options.All)
-    {
-        if (options.IncludeRoleNames.Count > 0)
-        {
-            var include = options.IncludeRoleNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            selected = selected.Where(role => include.Contains(role.Name));
-        }
-        else if (!string.IsNullOrWhiteSpace(options.IncludeNamePrefix))
-        {
-            selected = selected.Where(role => role.Name.StartsWith(options.IncludeNamePrefix, StringComparison.OrdinalIgnoreCase));
-        }
-        else
-        {
-            var configuredGroups = options.FallbackGroupNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            selected = selected.Where(role => configuredGroups.Contains(role.Name));
-        }
-    }
+    var selectedNames = BootstrapAdGroupsLogic.SelectRoleNames(
+            roles.Select(role => role.Name),
+            new BootstrapRoleSelection(
+                options.All,
+                options.IncludeNamePrefix,
+                options.IncludeRoleNames,
+                options.ExcludeRoleNames,
+                options.FallbackGroupNames))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    if (options.ExcludeRoleNames.Count > 0)
-    {
-        var exclude = options.ExcludeRoleNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        selected = selected.Where(role => !exclude.Contains(role.Name));
-    }
-
-    return selected.ToList();
+    return roles
+        .Where(role => selectedNames.Contains(role.Name))
+        .ToList();
 }
 
 static LdapConnection CreateLdapConnection(ActiveDirectoryOptions options)
@@ -177,7 +190,20 @@ static LdapConnection CreateLdapConnection(ActiveDirectoryOptions options)
     return connection;
 }
 
-static string? FindExistingGroupDn(LdapConnection connection, ActiveDirectoryOptions options, string groupName)
+static Task<string?> FindExistingGroupDnAsync(
+    LdapConnection connection,
+    ActiveDirectoryOptions options,
+    string groupName,
+    CancellationToken cancellationToken)
+{
+    return ExecuteAdWithRetryAsync(
+        options,
+        $"LDAP group search for {groupName}",
+        token => Task.Run(() => FindExistingGroupDnOnce(connection, options, groupName), token),
+        cancellationToken);
+}
+
+static string? FindExistingGroupDnOnce(LdapConnection connection, ActiveDirectoryOptions options, string groupName)
 {
     var filter = $"(&(objectClass=group)({options.GroupNameAttribute}={EscapeFilterValue(groupName)}))";
     var request = new SearchRequest(options.GroupSearchBaseDn, filter, SearchScope.Subtree, "distinguishedName");
@@ -185,12 +211,31 @@ static string? FindExistingGroupDn(LdapConnection connection, ActiveDirectoryOpt
     return response.Entries.Count > 0 ? response.Entries[0].DistinguishedName : null;
 }
 
-static void CreateGroup(LdapConnection connection, string name, string dn, BootstrapOptions options)
+static Task CreateGroupAsync(
+    LdapConnection connection,
+    ActiveDirectoryOptions adOptions,
+    string name,
+    string dn,
+    BootstrapOptions options,
+    CancellationToken cancellationToken)
+{
+    return ExecuteAdWithRetryAsync(
+        adOptions,
+        $"LDAP group create for {name}",
+        token => Task.Run(() =>
+        {
+            CreateGroupOnce(connection, name, dn, options);
+            return true;
+        }, token),
+        cancellationToken);
+}
+
+static void CreateGroupOnce(LdapConnection connection, string name, string dn, BootstrapOptions options)
 {
     var request = new AddRequest(dn, new DirectoryAttribute("objectClass", "top", "group"));
     request.Attributes.Add(new DirectoryAttribute("cn", name));
-    request.Attributes.Add(new DirectoryAttribute("sAMAccountName", BuildSamAccountName(name)));
-    request.Attributes.Add(new DirectoryAttribute("groupType", BuildGroupType(options).ToString()));
+    request.Attributes.Add(new DirectoryAttribute("sAMAccountName", BootstrapAdGroupsLogic.BuildSamAccountName(name)));
+    request.Attributes.Add(new DirectoryAttribute("groupType", BootstrapAdGroupsLogic.BuildGroupType(options.GroupScope, options.SecurityEnabled).ToString()));
     if (!string.IsNullOrWhiteSpace(options.DescriptionTemplate))
     {
         request.Attributes.Add(new DirectoryAttribute(
@@ -199,40 +244,6 @@ static void CreateGroup(LdapConnection connection, string name, string dn, Boots
     }
 
     connection.SendRequest(request);
-}
-
-static int BuildGroupType(BootstrapOptions options)
-{
-    var scope = options.GroupScope.ToLowerInvariant() switch
-    {
-        "global" => 0x00000002,
-        "domainlocal" or "domain-local" => 0x00000004,
-        "universal" => 0x00000008,
-        _ => throw new InvalidOperationException($"Unsupported group scope: {options.GroupScope}")
-    };
-
-    return options.SecurityEnabled ? unchecked((int)0x80000000) | scope : scope;
-}
-
-static string BuildSamAccountName(string name)
-{
-    var value = name.Trim();
-    if (value.Length > 256)
-    {
-        throw new InvalidOperationException($"Role name is too long for AD sAMAccountName: {name}");
-    }
-
-    if (value.IndexOfAny(['"', '/', '\\', '[', ']', ':', ';', '|', '=', ',', '+', '*', '?', '<', '>']) >= 0)
-    {
-        throw new InvalidOperationException($"Role name contains characters unsafe for AD sAMAccountName: {name}");
-    }
-
-    return value;
-}
-
-static string BuildGroupDn(string groupName, string targetOuDn)
-{
-    return $"CN={EscapeDnValue(groupName)},{targetOuDn}";
 }
 
 static void PrintPlan(IReadOnlyList<GroupPlanItem> plan, bool apply)
@@ -262,7 +273,11 @@ static ActiveDirectoryOptions ReadAdOptions(IConfiguration configuration)
         Required(configuration, "ActiveDirectory:BindPassword"),
         Required(configuration, "ActiveDirectory:GroupSearchBaseDn"),
         Value(configuration, "ActiveDirectory:GroupNameAttribute") ?? "cn",
-        IntValue(configuration, "ActiveDirectory:RequestTimeoutMs", 15000));
+        IntValue(configuration, "ActiveDirectory:RequestTimeoutMs", 15000),
+        IntValue(configuration, "ActiveDirectory:RetryAttempts", 3),
+        IntValue(configuration, "ActiveDirectory:RetryBaseDelayMs", 250),
+        IntValue(configuration, "ActiveDirectory:RetryMaxDelayMs", 2000),
+        IntValue(configuration, "ActiveDirectory:RetryJitterPercent", 20));
 }
 
 static CmdbuildOptions ReadCmdbuildOptions(IConfiguration configuration)
@@ -273,6 +288,10 @@ static CmdbuildOptions ReadCmdbuildOptions(IConfiguration configuration)
         Required(configuration, "Cmdbuild:Password"),
         IntValue(configuration, "Cmdbuild:RequestTimeoutMs", 15000),
         IntValue(configuration, "Cmdbuild:RolesPageSize", 1000),
+        IntValue(configuration, "Cmdbuild:RetryAttempts", 3),
+        IntValue(configuration, "Cmdbuild:RetryBaseDelayMs", 250),
+        IntValue(configuration, "Cmdbuild:RetryMaxDelayMs", 2000),
+        IntValue(configuration, "Cmdbuild:RetryJitterPercent", 20),
         StringList(configuration, "Cmdbuild:RoleNameFields", ["name", "code", "description"]),
         BoolValue(configuration, "BootstrapAdGroups:IncludeInactiveRoles"));
 }
@@ -300,17 +319,177 @@ static BootstrapOptions ReadBootstrapOptions(IConfiguration configuration)
         TimeoutMs: IntValue(configuration, "BootstrapAdGroups:TimeoutMs", 120000));
 }
 
-static void ValidateOptions(ActiveDirectoryOptions ad, CmdbuildOptions cmdb, BootstrapOptions options)
+static void ValidateOptions(ActiveDirectoryOptions ad, CmdbuildOptions cmdb, BootstrapOptions options, string environment)
 {
     if (string.IsNullOrWhiteSpace(options.TargetOuDn))
     {
         throw new InvalidOperationException("BootstrapAdGroups:TargetOuDn is required, or ActiveDirectory:GroupSearchBaseDn must be set.");
     }
 
-    if (cmdb.RolesPageSize <= 0 || ad.RequestTimeoutMs <= 0 || options.TimeoutMs <= 0)
+    if (cmdb.RolesPageSize <= 0 || ad.RequestTimeoutMs <= 0 || cmdb.RequestTimeoutMs <= 0 || options.TimeoutMs <= 0)
     {
         throw new InvalidOperationException("Timeout/page size settings must be positive.");
     }
+
+    if (ad.RetryAttempts <= 0 || cmdb.RetryAttempts <= 0
+        || ad.RetryBaseDelayMs <= 0 || cmdb.RetryBaseDelayMs <= 0
+        || ad.RetryMaxDelayMs < ad.RetryBaseDelayMs || cmdb.RetryMaxDelayMs < cmdb.RetryBaseDelayMs
+        || ad.RetryJitterPercent is < 0 or > 100 || cmdb.RetryJitterPercent is < 0 or > 100)
+    {
+        throw new InvalidOperationException("Retry settings must be positive, bounded, and use jitter between 0 and 100.");
+    }
+
+    if (!string.Equals(environment, "Production", StringComparison.OrdinalIgnoreCase))
+    {
+        return;
+    }
+
+    if (!ProductionGuards.ActiveDirectoryUsesSecureTransport(ad.UseSsl))
+    {
+        throw new InvalidOperationException("ActiveDirectory:UseSsl must be true in Production because LDAP simple bind sends credentials.");
+    }
+
+    if (ProductionGuards.AllowsActiveDirectoryCertificateBypass(ad.IgnoreCertificateErrors))
+    {
+        throw new InvalidOperationException("ActiveDirectory:IgnoreCertificateErrors is not allowed in Production.");
+    }
+
+    if (!ProductionGuards.CmdbuildBaseUrlUsesHttps(cmdb.BaseUrl))
+    {
+        throw new InvalidOperationException("Cmdbuild:BaseUrl must use https in Production.");
+    }
+}
+
+static async Task<T> ExecuteCmdbuildWithRetryAsync<T>(
+    CmdbuildOptions options,
+    string operationName,
+    Func<CancellationToken, Task<T>> operation,
+    CancellationToken cancellationToken)
+{
+    var attempts = Math.Max(1, options.RetryAttempts);
+    for (var attempt = 1; attempt <= attempts; attempt++)
+    {
+        try
+        {
+            return await operation(cancellationToken);
+        }
+        catch (Exception exception) when (ShouldRetryCmdbuild(exception, attempt, attempts, cancellationToken))
+        {
+            var delay = RetryBackoff.CalculateDelay(
+                attempt,
+                options.RetryBaseDelayMs,
+                options.RetryMaxDelayMs,
+                options.RetryJitterPercent);
+            Console.Error.WriteLine(
+                $"Transient {operationName} failure on attempt {attempt}/{attempts}; status={RetryStatus(exception)}; retrying in {(int)delay.TotalMilliseconds}ms.");
+            await Task.Delay(delay, cancellationToken);
+        }
+    }
+
+    throw new InvalidOperationException($"{operationName} retry loop exhausted unexpectedly.");
+}
+
+static async Task<T> ExecuteAdWithRetryAsync<T>(
+    ActiveDirectoryOptions options,
+    string operationName,
+    Func<CancellationToken, Task<T>> operation,
+    CancellationToken cancellationToken)
+{
+    var attempts = Math.Max(1, options.RetryAttempts);
+    for (var attempt = 1; attempt <= attempts; attempt++)
+    {
+        try
+        {
+            return await operation(cancellationToken);
+        }
+        catch (Exception exception) when (ShouldRetryAd(exception, attempt, attempts, cancellationToken))
+        {
+            var delay = RetryBackoff.CalculateDelay(
+                attempt,
+                options.RetryBaseDelayMs,
+                options.RetryMaxDelayMs,
+                options.RetryJitterPercent);
+            Console.Error.WriteLine(
+                $"Transient {operationName} failure on attempt {attempt}/{attempts}; ldapCode={LdapCode(exception)}; retrying in {(int)delay.TotalMilliseconds}ms.");
+            await Task.Delay(delay, cancellationToken);
+        }
+    }
+
+    throw new InvalidOperationException($"{operationName} retry loop exhausted unexpectedly.");
+}
+
+static bool ShouldRetryCmdbuild(Exception exception, int attempt, int attempts, CancellationToken cancellationToken)
+{
+    if (attempt >= attempts || cancellationToken.IsCancellationRequested)
+    {
+        return false;
+    }
+
+    return exception switch
+    {
+        HttpRequestException httpRequestException => IsTransientHttpStatus(httpRequestException.StatusCode),
+        TaskCanceledException => true,
+        TimeoutException => true,
+        _ => false
+    };
+}
+
+static bool ShouldRetryAd(Exception exception, int attempt, int attempts, CancellationToken cancellationToken)
+{
+    if (attempt >= attempts || cancellationToken.IsCancellationRequested)
+    {
+        return false;
+    }
+
+    return exception switch
+    {
+        LdapException ldapException => IsTransientLdapCode(ldapException.ErrorCode),
+        DirectoryOperationException directoryException => IsTransientDirectoryResult(directoryException),
+        IOException => true,
+        SocketException => true,
+        TimeoutException => true,
+        TaskCanceledException => true,
+        _ => exception.InnerException is not null && ShouldRetryAd(exception.InnerException, attempt, attempts, cancellationToken)
+    };
+}
+
+static bool IsTransientHttpStatus(HttpStatusCode? statusCode)
+{
+    var code = (int?)statusCode;
+    return statusCode is HttpStatusCode.RequestTimeout
+        or HttpStatusCode.TooManyRequests
+        || code is >= 500 and <= 599;
+}
+
+static bool IsTransientLdapCode(int code)
+{
+    return code is 51 or 52 or 80 or 81 or 85 or 91;
+}
+
+static bool IsTransientDirectoryResult(DirectoryOperationException exception)
+{
+    var code = (int?)exception.Response?.ResultCode;
+    return code is 3 or 51 or 52 or 80;
+}
+
+static string RetryStatus(Exception exception)
+{
+    if (exception is HttpRequestException { StatusCode: not null } httpRequestException)
+    {
+        return ((int)httpRequestException.StatusCode.Value).ToString();
+    }
+
+    return "none";
+}
+
+static string LdapCode(Exception exception)
+{
+    return exception switch
+    {
+        LdapException ldapException => ldapException.ErrorCode.ToString(),
+        DirectoryOperationException directoryException => ((int?)directoryException.Response?.ResultCode)?.ToString() ?? "none",
+        _ => "none"
+    };
 }
 
 static IEnumerable<JsonElement> ReadDataArray(JsonElement root)
@@ -464,30 +643,6 @@ static string EscapeFilterValue(string value)
         .Replace("\0", "\\00", StringComparison.Ordinal);
 }
 
-static string EscapeDnValue(string value)
-{
-    var escaped = value
-        .Replace("\\", "\\\\", StringComparison.Ordinal)
-        .Replace(",", "\\,", StringComparison.Ordinal)
-        .Replace("+", "\\+", StringComparison.Ordinal)
-        .Replace("\"", "\\\"", StringComparison.Ordinal)
-        .Replace("<", "\\<", StringComparison.Ordinal)
-        .Replace(">", "\\>", StringComparison.Ordinal)
-        .Replace(";", "\\;", StringComparison.Ordinal)
-        .Replace("=", "\\=", StringComparison.Ordinal);
-    if (escaped.StartsWith(' ') || escaped.StartsWith('#'))
-    {
-        escaped = $"\\{escaped}";
-    }
-
-    if (escaped.EndsWith(' '))
-    {
-        escaped = $"{escaped[..^1]}\\ ";
-    }
-
-    return escaped;
-}
-
 static void PrintHelp()
 {
     Console.WriteLine("""
@@ -518,7 +673,11 @@ internal sealed record ActiveDirectoryOptions(
     string BindPassword,
     string GroupSearchBaseDn,
     string GroupNameAttribute,
-    int RequestTimeoutMs);
+    int RequestTimeoutMs,
+    int RetryAttempts,
+    int RetryBaseDelayMs,
+    int RetryMaxDelayMs,
+    int RetryJitterPercent);
 
 internal sealed record CmdbuildOptions(
     string BaseUrl,
@@ -526,6 +685,10 @@ internal sealed record CmdbuildOptions(
     string Password,
     int RequestTimeoutMs,
     int RolesPageSize,
+    int RetryAttempts,
+    int RetryBaseDelayMs,
+    int RetryMaxDelayMs,
+    int RetryJitterPercent,
     IReadOnlyCollection<string> RoleNameFields,
     bool IncludeInactiveRoles);
 
@@ -545,7 +708,7 @@ internal sealed record BootstrapOptions(
     int TimeoutMs)
 {
     public bool HasExplicitSelection =>
-        All || !string.IsNullOrWhiteSpace(IncludeNamePrefix) || IncludeRoleNames.Count > 0;
+        BootstrapAdGroupsLogic.HasExplicitSelection(All, IncludeNamePrefix, IncludeRoleNames);
 }
 
 internal sealed record GroupPlanItem(string Name, string? ExistingDn, string TargetDn, bool ShouldCreate);

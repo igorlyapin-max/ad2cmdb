@@ -43,8 +43,8 @@
 
 ## `/ready`
 
-По умолчанию возвращает shallow readiness без обращения к AD/CMDBuild.
-Если `Readiness:CheckDependencies=true`, endpoint выполняет LDAP bind и lightweight CMDBuild REST call с timeout `Readiness:TimeoutMs`.
+По умолчанию для development возвращает shallow readiness без обращения к AD/CMDBuild.
+В `Production` `Readiness:CheckDependencies=true` обязателен: endpoint выполняет LDAP bind и lightweight CMDBuild REST call с timeout `Readiness:TimeoutMs`.
 При ошибке dependency возвращается HTTP `503`.
 
 Все status endpoints могут вернуть HTTP `429`, если превышен `EndpointRateLimiting`.

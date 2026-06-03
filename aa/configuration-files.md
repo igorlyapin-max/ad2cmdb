@@ -78,9 +78,12 @@ ElkLogging__ApiKey=secret://AAA.LOCAL/PROD/elk-api-key
 | `Cmdbuild` | `RetryAttempts`, `RetryBaseDelayMs`, `RetryMaxDelayMs`, `RetryJitterPercent` | Retry для HTTP `408`, `429`, `5xx`, timeout и network errors |
 | `Sync` | `ShutdownGracePeriodSeconds` | Время ожидания активного sync-run при SIGTERM/SIGINT перед отменой |
 
+`bootstrap-ad-groups` использует те же `ActiveDirectory` и `Cmdbuild` retry settings для transient role read, bind, search и group create ошибок.
+
 ## Bootstrap Tool Config
 
 `scripts/bootstrap-ad-groups.sh` использует те же AD, CMDBuild, Secrets sections.
+Retry, timeout и PAM/AAPM настройки читаются из той же configuration chain, что и у сервиса.
 
 Дополнительные параметры задаются CLI или секцией `BootstrapAdGroups`:
 

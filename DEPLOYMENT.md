@@ -20,7 +20,7 @@
 
 Нужны:
 
-- доступ сервиса к MS AD по LDAP `389` или LDAPS `636`;
+- доступ сервиса к MS AD по LDAPS `636` для production; LDAP `389` допустим только для локальной разработки;
 - доступ сервиса к CMDBuild REST API v3;
 - сервисная УЗ AD для чтения групп и пользователей;
 - сервисная УЗ CMDBuild для управления пользователями;
@@ -108,6 +108,7 @@ Sync__IntervalSeconds=300
 Sync__FailureBackoffSeconds=30
 Sync__ShutdownGracePeriodSeconds=60
 AllowedHosts=adgroups2cmdbuild.example.local
+Readiness__CheckDependencies=true
 
 Debug__Enabled=false
 Debug__Level=Basic
@@ -120,8 +121,10 @@ Debug__Level=Basic
 В `Production` действуют runtime guards:
 
 - `ActiveDirectory:IgnoreCertificateErrors=true` запрещен;
+- `ActiveDirectory:UseSsl` должен быть `true`;
 - `Cmdbuild:BaseUrl` должен быть `https://...`;
-- `AllowedHosts` не должен быть `*`.
+- `Readiness:CheckDependencies` должен быть `true`;
+- `AllowedHosts` не должен содержать `*`.
 
 Для локальной разработки используйте `ASPNETCORE_ENVIRONMENT=Development`.
 
@@ -134,6 +137,7 @@ Debug__Level=Basic
 
 Ошибки постоянного характера не повторяются: неверный bind password, `401/403`, неверный DN/filter, отсутствие прав или отсутствующая группа/role.
 Backoff общий для AD и CMDBuild: exponential delay от `RetryBaseDelayMs` до `RetryMaxDelayMs` плюс `RetryJitterPercent`.
+`bootstrap-ad-groups` использует эти же retry settings для CMDBuild role reads и LDAP bind/search/create операций.
 
 ## 5. Секреты и PAM/AAPM
 
@@ -188,6 +192,7 @@ Apply:
 - без фильтра tool использует `ActiveDirectory:GroupNames`.
 
 Защита: `--apply` без явного выбора запрещен, если не задано `BootstrapAdGroups:RequireExplicitSelectionForApply=false`.
+Transient ошибки CMDBuild/LDAP в tool повторяются с bounded backoff; постоянные ошибки credentials, DN/filter или прав завершают запуск без retry.
 
 ## 7. Локальный Запуск
 
@@ -211,6 +216,7 @@ Cmdbuild__BaseUrl='https://cmdbuild.example/cmdbuild/services/rest/v3' \
 Cmdbuild__Username=cmdbuild-sync \
 Cmdbuild__Password='<secret>' \
 Sync__DryRun=true \
+Readiness__CheckDependencies=true \
 ./scripts/dotnet run --project src/adgroups2cmdbuild/adgroups2cmdbuild.csproj
 ```
 
@@ -222,6 +228,8 @@ curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
 
+OpenAPI contract для этих endpoint-ов хранится в `aa/contracts/operational-api.openapi.json`.
+
 ## 8. Docker
 
 Сборка образа:
@@ -229,7 +237,7 @@ curl http://localhost:5084/sync/status
 ```bash
 docker build \
   -f deploy/dockerfiles/adgroups2cmdbuild.Dockerfile \
-  -t adgroups2cmdbuild:0.1.0 \
+  -t adgroups2cmdbuild:0.3.0 \
   .
 ```
 
@@ -254,9 +262,13 @@ docker run -d \
   -e Cmdbuild__Username=cmdbuild-sync \
   -e Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-sync' \
   -e Sync__DryRun=true \
+  -e Readiness__CheckDependencies=true \
   -e AllowedHosts=adgroups2cmdbuild.example.local \
-  adgroups2cmdbuild:0.1.0
+  adgroups2cmdbuild:0.3.0
 ```
+
+Image запускает процесс от non-root пользователя `ad2cmdb` с UID/GID `64100`.
+Mounted state volume должен быть writable для UID/GID `64100`.
 
 После проверки dry-run включите применение:
 
@@ -331,7 +343,7 @@ docker run -d \
   -p 5084:8080 \
   -v "$PWD/state:/app/state" \
   ... \
-  adgroups2cmdbuild:0.1.0
+  adgroups2cmdbuild:0.3.0
 ```
 
 Для TCP/TLS syslog используйте адреса вида:

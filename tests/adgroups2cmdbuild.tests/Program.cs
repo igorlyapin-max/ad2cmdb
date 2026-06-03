@@ -1,9 +1,14 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using AdGroups2Cmdbuild.ActiveDirectory;
 using AdGroups2Cmdbuild.Cmdbuild;
 using AdGroups2Cmdbuild.Configuration;
 using AdGroups2Cmdbuild.Resilience;
 using AdGroups2Cmdbuild.Sync;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -13,9 +18,26 @@ var tests = new (string Name, Func<Task> Run)[]
     ("state store recovers from backup", StateStoreRecoversFromBackup),
     ("partial failure status is visible", PartialFailureStatusIsVisible),
     ("debug sensitive values are masked by default", DebugSensitiveValuesAreMaskedByDefault),
+    ("production guards enforce secure runtime", ProductionGuardsEnforceSecureRuntime),
+    ("production startup rejects unsafe runtime config", ProductionStartupRejectsUnsafeRuntimeConfig),
+    ("production startup accepts safe runtime config", ProductionStartupAcceptsSafeRuntimeConfig),
+    ("development health and readiness endpoints work without dependencies", DevelopmentHealthAndReadinessEndpointsWorkWithoutDependencies),
+    ("operational OpenAPI contract describes runtime endpoints", OperationalOpenApiContractDescribesRuntimeEndpoints),
     ("retry backoff uses exponential cap", RetryBackoffUsesExponentialCap),
     ("CMDBuild retry retries transient status", CmdbuildRetryRetriesTransientStatus),
     ("CMDBuild retry skips authorization status", CmdbuildRetrySkipsAuthorizationStatus),
+    ("CMDBuild create request uses expected REST contract", CmdbuildCreateRequestUsesExpectedRestContract),
+    ("CMDBuild update preserves unmanaged groups", CmdbuildUpdatePreservesUnmanagedGroups),
+    ("CMDBuild disable request revokes groups", CmdbuildDisableRequestRevokesGroups),
+    ("sync fails when AD group is missing", SyncFailsWhenAdGroupIsMissing),
+    ("sync fails when CMDBuild role is missing", SyncFailsWhenCmdbuildRoleIsMissing),
+    ("sync skips missing CMDBuild users when creation disabled", SyncSkipsMissingCmdbuildUsersWhenCreationDisabled),
+    ("dry-run does not save sync state", DryRunDoesNotSaveSyncState),
+    ("sync deprovisions managed user outside provisioning group", SyncDeprovisionsManagedUserOutsideProvisioningGroup),
+    ("ELK logging options validate active sink", ElkLoggingOptionsValidateActiveSink),
+    ("bootstrap tool help works", BootstrapToolHelpWorks),
+    ("bootstrap role selection uses explicit precedence", BootstrapRoleSelectionUsesExplicitPrecedence),
+    ("bootstrap naming logic escapes and rejects unsafe values", BootstrapNamingLogicEscapesAndRejectsUnsafeValues),
     ("worker stop waits for active sync run", WorkerStopWaitsForActiveRun),
     ("worker stop cancels after grace period", WorkerStopCancelsAfterGracePeriod)
 };
@@ -126,6 +148,116 @@ static Task DebugSensitiveValuesAreMaskedByDefault()
     return Task.CompletedTask;
 }
 
+static Task ProductionGuardsEnforceSecureRuntime()
+{
+    AssertEqual(true, ProductionGuards.HasWildcardAllowedHost("*"), "single wildcard host");
+    AssertEqual(true, ProductionGuards.HasWildcardAllowedHost("api.example.local;*"), "listed wildcard host");
+    AssertEqual(false, ProductionGuards.HasWildcardAllowedHost("api.example.local;localhost"), "explicit hosts");
+
+    AssertEqual(false, ProductionGuards.ActiveDirectoryUsesSecureTransport(false), "AD cleartext transport");
+    AssertEqual(true, ProductionGuards.ActiveDirectoryUsesSecureTransport(true), "AD secure transport");
+    AssertEqual(true, ProductionGuards.AllowsActiveDirectoryCertificateBypass(true), "AD certificate bypass");
+
+    AssertEqual(true, ProductionGuards.CmdbuildBaseUrlUsesHttps("https://cmdbuild.example/cmdbuild/services/rest/v3"), "CMDBuild https URL");
+    AssertEqual(false, ProductionGuards.CmdbuildBaseUrlUsesHttps("http://cmdbuild.example/cmdbuild/services/rest/v3"), "CMDBuild http URL");
+    AssertEqual(false, ProductionGuards.CmdbuildBaseUrlUsesHttps("not-a-url"), "CMDBuild invalid URL");
+
+    AssertEqual(true, ProductionGuards.ReadinessChecksDependencies(true, true), "dependency readiness");
+    AssertEqual(false, ProductionGuards.ReadinessChecksDependencies(true, false), "shallow readiness");
+    AssertEqual(false, ProductionGuards.ReadinessChecksDependencies(false, true), "disabled readiness");
+    return Task.CompletedTask;
+}
+
+static async Task ProductionStartupRejectsUnsafeRuntimeConfig()
+{
+    var scenarios = new (string Name, Dictionary<string, string> Overrides, string ExpectedText)[]
+    {
+        ("wildcard allowed hosts", new Dictionary<string, string> { ["AllowedHosts"] = "*" }, "AllowedHosts must not contain '*'"),
+        ("AD cleartext transport", new Dictionary<string, string> { ["ActiveDirectory__UseSsl"] = "false" }, "ActiveDirectory:UseSsl must be true"),
+        ("AD certificate bypass", new Dictionary<string, string> { ["ActiveDirectory__IgnoreCertificateErrors"] = "true" }, "ActiveDirectory:IgnoreCertificateErrors is not allowed"),
+        ("CMDBuild http URL", new Dictionary<string, string> { ["Cmdbuild__BaseUrl"] = "http://cmdbuild.example.local/cmdbuild/services/rest/v3" }, "Cmdbuild:BaseUrl must use https"),
+        ("readiness disabled", new Dictionary<string, string> { ["Readiness__Enabled"] = "false" }, "Readiness:Enabled and Readiness:CheckDependencies must be true"),
+        ("readiness without dependencies", new Dictionary<string, string> { ["Readiness__CheckDependencies"] = "false" }, "Readiness:Enabled and Readiness:CheckDependencies must be true")
+    };
+
+    foreach (var scenario in scenarios)
+    {
+        var env = NewServiceEnvironment("Production", GetFreeTcpPort());
+        foreach (var item in scenario.Overrides)
+        {
+            env[item.Key] = item.Value;
+        }
+
+        await using var service = ServiceProcessHandle.Start(env);
+        await service.WaitForExitAsync(TimeSpan.FromSeconds(8), scenario.Name);
+        AssertTrue(service.Process.ExitCode != 0, $"{scenario.Name}: expected non-zero exit code");
+        AssertTextContains(service.Output, scenario.ExpectedText, scenario.Name);
+    }
+}
+
+static async Task ProductionStartupAcceptsSafeRuntimeConfig()
+{
+    var port = GetFreeTcpPort();
+    await using var service = ServiceProcessHandle.Start(NewServiceEnvironment("Production", port));
+    await WaitForHttpOkAsync(service, $"http://127.0.0.1:{port}/health", TimeSpan.FromSeconds(8), "production /health");
+
+    AssertTrue(!service.Process.HasExited, "production service should keep running after safe startup");
+    AssertTextContains(service.Output, "Now listening", "production startup log");
+}
+
+static async Task DevelopmentHealthAndReadinessEndpointsWorkWithoutDependencies()
+{
+    var port = GetFreeTcpPort();
+    var env = NewServiceEnvironment("Development", port);
+    env["Readiness__CheckDependencies"] = "false";
+
+    await using var service = ServiceProcessHandle.Start(env);
+    await WaitForHttpOkAsync(service, $"http://127.0.0.1:{port}/health", TimeSpan.FromSeconds(8), "development /health");
+
+    using (var health = await GetServiceJsonAsync($"http://127.0.0.1:{port}/health"))
+    {
+        var root = health.RootElement;
+        AssertEqual("adgroups2cmdbuild", root.GetProperty("service").GetString(), "health service");
+        AssertEqual("ok", root.GetProperty("status").GetString(), "health status");
+        AssertEqual(JsonValueKind.Object, root.GetProperty("sync").ValueKind, "health sync object");
+    }
+
+    using (var readiness = await GetServiceJsonAsync($"http://127.0.0.1:{port}/ready"))
+    {
+        var root = readiness.RootElement;
+        AssertEqual("ready", root.GetProperty("status").GetString(), "readiness status");
+        AssertEqual(false, root.GetProperty("dependenciesChecked").GetBoolean(), "readiness dependencies");
+    }
+
+    using (var status = await GetServiceJsonAsync($"http://127.0.0.1:{port}/sync/status"))
+    {
+        AssertEqual(JsonValueKind.Object, status.RootElement.ValueKind, "sync status object");
+    }
+}
+
+static Task OperationalOpenApiContractDescribesRuntimeEndpoints()
+{
+    var contractPath = Path.Combine(FindRepoRoot(), "aa", "contracts", "operational-api.openapi.json");
+    AssertTrue(File.Exists(contractPath), "operational OpenAPI contract should exist");
+
+    using var contract = JsonDocument.Parse(File.ReadAllText(contractPath));
+    var root = contract.RootElement;
+    AssertEqual("3.1.0", root.GetProperty("openapi").GetString(), "OpenAPI version");
+
+    var paths = root.GetProperty("paths");
+    AssertPathResponse(paths, "/health", "200");
+    AssertPathResponse(paths, "/ready", "200");
+    AssertPathResponse(paths, "/ready", "503");
+    AssertPathResponse(paths, "/sync/status", "200");
+
+    var schemas = root.GetProperty("components").GetProperty("schemas");
+    AssertRequiredProperties(schemas.GetProperty("HealthResponse"), ["service", "status", "sync"], "HealthResponse");
+    AssertRequiredProperties(schemas.GetProperty("ReadinessResponse"), ["service", "status", "dependenciesChecked"], "ReadinessResponse");
+    AssertRequiredProperties(schemas.GetProperty("SyncStatus"), ["isRunning", "lastStartedUtc", "lastCompletedUtc", "lastSucceeded", "lastError", "lastSummary"], "SyncStatus");
+    AssertRequiredProperties(schemas.GetProperty("SyncRunSummary"), ["adUsers", "provisionedUsers", "createdUsers", "updatedUsers", "disabledUsers", "skippedUsers", "failedUsers", "dryRun", "hasFailures"], "SyncRunSummary");
+    return Task.CompletedTask;
+}
+
 static Task RetryBackoffUsesExponentialCap()
 {
     AssertEqual(250, (int)RetryBackoff.CalculateDelay(1, 250, 1000, 0).TotalMilliseconds, "attempt 1 delay");
@@ -177,6 +309,328 @@ static async Task CmdbuildRetrySkipsAuthorizationStatus()
     }
 
     throw new InvalidOperationException("expected CMDBuild authorization failure");
+}
+
+static async Task CmdbuildCreateRequestUsesExpectedRestContract()
+{
+    var handler = new SequenceHttpHandler(_ => JsonResponse("{}"));
+    var client = NewCmdbuildClient(
+        handler,
+        retryAttempts: 1,
+        options =>
+        {
+            options.NewUserPassword = "generated-by-test";
+            options.DefaultLanguage = "en";
+        });
+
+    await client.CreateUserAsync(
+        new UserUpsertRequest(
+            "alice",
+            "Alice Smith",
+            "alice@example.local",
+            [new CmdbuildRole("1", "CMDBuildUsers")],
+            ["1"]),
+        CancellationToken.None);
+
+    var request = handler.CapturedRequests.Single();
+    AssertEqual("POST", request.Method, "create method");
+    AssertTextContains(request.Uri, "/users", "create path");
+    AssertEqual("Basic", request.AuthorizationScheme, "authorization scheme");
+    AssertEqual(
+        Convert.ToBase64String(Encoding.UTF8.GetBytes("cmdbuild-sync:secret")),
+        request.AuthorizationParameter,
+        "authorization parameter");
+    AssertEqual("admin", request.CmdbuildView, "CMDBuild view header");
+
+    using var document = JsonDocument.Parse(request.Body ?? "{}");
+    var root = document.RootElement;
+    AssertEqual("alice", root.GetProperty("username").GetString(), "create username");
+    AssertEqual(true, root.GetProperty("active").GetBoolean(), "create active");
+    AssertEqual(false, root.GetProperty("service").GetBoolean(), "create service flag");
+    AssertEqual(true, root.GetProperty("multiGroup").GetBoolean(), "create multigroup");
+    AssertEqual("generated-by-test", root.GetProperty("password").GetString(), "create password");
+    AssertEqual("Alice Smith", root.GetProperty("description").GetString(), "create display name");
+    AssertEqual("alice@example.local", root.GetProperty("email").GetString(), "create email");
+    AssertEqual("en", root.GetProperty("language").GetString(), "create language");
+    AssertContains("1", ReadRoleIds(root), "create role ids");
+}
+
+static async Task CmdbuildUpdatePreservesUnmanagedGroups()
+{
+    var handler = new SequenceHttpHandler(_ => JsonResponse("{}"));
+    var client = NewCmdbuildClient(
+        handler,
+        retryAttempts: 1,
+        options => options.PreserveUnmanagedGroups = true);
+    var existingUser = new CmdbuildUser
+    {
+        Id = "user-1",
+        Username = "alice",
+        Active = true
+    };
+    existingUser.RoleIds.Add("managed-old");
+    existingUser.RoleIds.Add("external-role");
+
+    await client.UpdateUserAsync(
+        existingUser,
+        new UserUpsertRequest(
+            "alice",
+            "Alice Smith",
+            "alice@example.local",
+            [new CmdbuildRole("managed-new", "CMDBuildEditors")],
+            ["managed-old", "managed-new"]),
+        CancellationToken.None);
+
+    var request = handler.CapturedRequests.Single();
+    AssertEqual("PUT", request.Method, "update method");
+    AssertTextContains(request.Uri, "/users/user-1", "update path");
+
+    using var document = JsonDocument.Parse(request.Body ?? "{}");
+    var roleIds = ReadRoleIds(document.RootElement);
+    AssertContains("managed-new", roleIds, "update role ids");
+    AssertContains("external-role", roleIds, "update role ids");
+    AssertDoesNotContain("managed-old", roleIds, "update role ids");
+}
+
+static async Task CmdbuildDisableRequestRevokesGroups()
+{
+    var handler = new SequenceHttpHandler(_ => JsonResponse("{}"));
+    var client = NewCmdbuildClient(handler, retryAttempts: 1);
+    var existingUser = new CmdbuildUser
+    {
+        Id = "user-1",
+        Username = "alice",
+        Active = true
+    };
+    existingUser.RoleIds.Add("1");
+
+    await client.DisableUserAsync(existingUser, CancellationToken.None);
+
+    var request = handler.CapturedRequests.Single();
+    AssertEqual("PUT", request.Method, "disable method");
+    AssertTextContains(request.Uri, "/users/user-1", "disable path");
+
+    using var document = JsonDocument.Parse(request.Body ?? "{}");
+    var root = document.RootElement;
+    AssertEqual("alice", root.GetProperty("username").GetString(), "disable username");
+    AssertEqual(false, root.GetProperty("active").GetBoolean(), "disable active");
+    AssertEqual(0, root.GetProperty("userGroups").GetArrayLength(), "disable role count");
+    AssertEqual(JsonValueKind.Null, root.GetProperty("defaultUserGroup").ValueKind, "disable default group");
+}
+
+static async Task SyncFailsWhenAdGroupIsMissing()
+{
+    var adSnapshot = new AdGroupSnapshot();
+    adSnapshot.Groups["CMDBuildUsers"] = new Dictionary<string, AdUserRecord>(StringComparer.OrdinalIgnoreCase);
+
+    var service = NewSynchronizationService(
+        adSnapshot,
+        NewCmdbSnapshot("CMDBuildUsers"),
+        new InMemoryStateStore(),
+        new SyncOptions());
+
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => service.RunOnceAsync(CancellationToken.None),
+        "AD groups are missing");
+}
+
+static async Task SyncFailsWhenCmdbuildRoleIsMissing()
+{
+    var service = NewSynchronizationService(
+        NewAdSnapshot("CMDBuildUsers", "alice"),
+        new CmdbuildSnapshot(),
+        new InMemoryStateStore(),
+        new SyncOptions());
+
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => service.RunOnceAsync(CancellationToken.None),
+        "CMDBuild roles are missing");
+}
+
+static async Task SyncSkipsMissingCmdbuildUsersWhenCreationDisabled()
+{
+    var stateStore = new InMemoryStateStore();
+    var cmdbuildClient = new FakeCmdbuildClient(NewCmdbSnapshot("CMDBuildUsers"));
+    var service = NewSynchronizationServiceWithClient(
+        NewAdSnapshot("CMDBuildUsers", "alice"),
+        cmdbuildClient,
+        stateStore,
+        new SyncOptions { DryRun = false },
+        cmdbuildOptions: new CmdbuildOptions { CreateMissingUsers = false });
+
+    var summary = await service.RunOnceAsync(CancellationToken.None);
+
+    AssertEqual(0, summary.CreatedUsers, "created users");
+    AssertEqual(1, summary.SkippedUsers, "skipped users");
+    AssertEqual(0, cmdbuildClient.CreatedLogins.Count, "created logins");
+    AssertEqual(1, stateStore.SaveCount, "save count");
+    AssertDoesNotContain("alice", stateStore.SavedState.ManagedLogins, "saved managed logins");
+}
+
+static async Task DryRunDoesNotSaveSyncState()
+{
+    var stateStore = new InMemoryStateStore();
+    var cmdbuildClient = new FakeCmdbuildClient(NewCmdbSnapshot("CMDBuildUsers"));
+    var service = NewSynchronizationServiceWithClient(
+        NewAdSnapshot("CMDBuildUsers", "alice"),
+        cmdbuildClient,
+        stateStore,
+        new SyncOptions { DryRun = true });
+
+    var summary = await service.RunOnceAsync(CancellationToken.None);
+
+    AssertEqual(1, summary.CreatedUsers, "dry-run planned created users");
+    AssertEqual(0, cmdbuildClient.CreatedLogins.Count, "created logins");
+    AssertEqual(0, stateStore.SaveCount, "save count");
+}
+
+static async Task SyncDeprovisionsManagedUserOutsideProvisioningGroup()
+{
+    var stateStore = new InMemoryStateStore();
+    stateStore.State.ManagedLogins.Add("old-user");
+    var cmdbSnapshot = NewCmdbSnapshot("CMDBuildUsers");
+    var existingUser = new CmdbuildUser
+    {
+        Id = "user-1",
+        Username = "old-user",
+        Active = true
+    };
+    existingUser.RoleIds.Add("1");
+    cmdbSnapshot.UsersByLogin["old-user"] = existingUser;
+    var cmdbuildClient = new FakeCmdbuildClient(cmdbSnapshot);
+    var service = NewSynchronizationServiceWithClient(
+        NewAdSnapshot("CMDBuildUsers"),
+        cmdbuildClient,
+        stateStore,
+        new SyncOptions { DryRun = false });
+
+    var summary = await service.RunOnceAsync(CancellationToken.None);
+
+    AssertEqual(1, summary.DisabledUsers, "disabled users");
+    AssertContains("old-user", cmdbuildClient.DisabledLogins, "disabled logins");
+    AssertEqual(1, stateStore.SaveCount, "save count");
+}
+
+static Task ElkLoggingOptionsValidateActiveSink()
+{
+    var options = new ElkLoggingOptions();
+    AssertEqual(false, options.IsActive(), "inactive by default");
+    AssertEqual(true, options.HasValidEndpoint(), "inactive endpoint validation");
+
+    options.Enabled = true;
+    AssertEqual(false, options.IsActive(), "enabled without endpoint");
+    AssertEqual(true, options.HasValidEndpoint(), "enabled without endpoint validation");
+
+    options.Endpoint = "not-a-url";
+    AssertEqual(true, options.IsActive(), "active invalid endpoint");
+    AssertEqual(false, options.HasValidEndpoint(), "invalid active endpoint");
+
+    options.Endpoint = "https://elk.example.local";
+    options.MinimumLevel = "Warning";
+    AssertEqual(true, options.HasValidEndpoint(), "valid active endpoint");
+    AssertEqual(true, options.HasValidMinimumLevel(), "valid minimum level");
+    AssertEqual(LogLevel.Warning, options.GetMinimumLevel(), "minimum level");
+
+    options.MinimumLevel = "DefinitelyNotALevel";
+    AssertEqual(false, options.HasValidMinimumLevel(), "invalid minimum level");
+    return Task.CompletedTask;
+}
+
+static async Task BootstrapToolHelpWorks()
+{
+    var result = await RunProcessAsync(
+        Path.Combine(FindRepoRoot(), "scripts", "bootstrap-ad-groups.sh"),
+        "--help",
+        FindRepoRoot(),
+        TimeSpan.FromSeconds(8));
+
+    AssertEqual(0, result.ExitCode, "bootstrap help exit code");
+    AssertTextContains(result.Output, "bootstrap-ad-groups creates missing AD groups", "bootstrap help output");
+}
+
+static Task BootstrapRoleSelectionUsesExplicitPrecedence()
+{
+    var roleNames = new[] { "CMDBuildUsers", "CMDBuildEditors", "OtherRole", "CMDBuildAdmins" };
+
+    AssertSequenceEqual(
+        ["CMDBuildUsers"],
+        BootstrapAdGroups.BootstrapAdGroupsLogic.SelectRoleNames(
+            roleNames,
+            new BootstrapAdGroups.BootstrapRoleSelection(
+                All: false,
+                IncludeNamePrefix: "",
+                IncludeRoleNames: [],
+                ExcludeRoleNames: [],
+                FallbackGroupNames: ["CMDBuildUsers"])),
+        "fallback selection");
+
+    AssertSequenceEqual(
+        ["OtherRole"],
+        BootstrapAdGroups.BootstrapAdGroupsLogic.SelectRoleNames(
+            roleNames,
+            new BootstrapAdGroups.BootstrapRoleSelection(
+                All: false,
+                IncludeNamePrefix: "CMDBuild",
+                IncludeRoleNames: ["OtherRole"],
+                ExcludeRoleNames: [],
+                FallbackGroupNames: ["CMDBuildUsers"])),
+        "include selection precedence");
+
+    AssertSequenceEqual(
+        ["CMDBuildEditors", "CMDBuildAdmins"],
+        BootstrapAdGroups.BootstrapAdGroupsLogic.SelectRoleNames(
+            roleNames,
+            new BootstrapAdGroups.BootstrapRoleSelection(
+                All: false,
+                IncludeNamePrefix: "CMDBuild",
+                IncludeRoleNames: [],
+                ExcludeRoleNames: ["CMDBuildUsers"],
+                FallbackGroupNames: [])),
+        "prefix selection with exclude");
+
+    AssertSequenceEqual(
+        ["CMDBuildUsers", "CMDBuildEditors", "CMDBuildAdmins"],
+        BootstrapAdGroups.BootstrapAdGroupsLogic.SelectRoleNames(
+            roleNames,
+            new BootstrapAdGroups.BootstrapRoleSelection(
+                All: true,
+                IncludeNamePrefix: "",
+                IncludeRoleNames: [],
+                ExcludeRoleNames: ["OtherRole"],
+                FallbackGroupNames: [])),
+        "all selection with exclude");
+
+    AssertEqual(true, BootstrapAdGroups.BootstrapAdGroupsLogic.HasExplicitSelection(true, "", []), "all explicit selection");
+    AssertEqual(true, BootstrapAdGroups.BootstrapAdGroupsLogic.HasExplicitSelection(false, "CMDBuild", []), "prefix explicit selection");
+    AssertEqual(true, BootstrapAdGroups.BootstrapAdGroupsLogic.HasExplicitSelection(false, "", ["CMDBuildUsers"]), "include explicit selection");
+    AssertEqual(false, BootstrapAdGroups.BootstrapAdGroupsLogic.HasExplicitSelection(false, "", []), "fallback is not explicit selection");
+    return Task.CompletedTask;
+}
+
+static Task BootstrapNamingLogicEscapesAndRejectsUnsafeValues()
+{
+    AssertEqual("CMDBuildUsers", BootstrapAdGroups.BootstrapAdGroupsLogic.BuildSamAccountName(" CMDBuildUsers "), "sAMAccountName trim");
+    AssertThrows<InvalidOperationException>(
+        () => BootstrapAdGroups.BootstrapAdGroupsLogic.BuildSamAccountName("CMDBuild/Users"),
+        "unsafe");
+    AssertThrows<InvalidOperationException>(
+        () => BootstrapAdGroups.BootstrapAdGroupsLogic.BuildSamAccountName(new string('a', 257)),
+        "too long");
+
+    AssertEqual(
+        unchecked((int)0x80000000) | 0x00000002,
+        BootstrapAdGroups.BootstrapAdGroupsLogic.BuildGroupType("Global", securityEnabled: true),
+        "security global group type");
+    AssertEqual(0x00000008, BootstrapAdGroups.BootstrapAdGroupsLogic.BuildGroupType("Universal", securityEnabled: false), "distribution universal group type");
+    AssertThrows<InvalidOperationException>(
+        () => BootstrapAdGroups.BootstrapAdGroupsLogic.BuildGroupType("Unsupported", securityEnabled: true),
+        "Unsupported group scope");
+
+    AssertEqual(
+        @"CN=\#Role\,One\ ,OU=Groups,DC=example,DC=local",
+        BootstrapAdGroups.BootstrapAdGroupsLogic.BuildGroupDn("#Role,One ", "OU=Groups,DC=example,DC=local"),
+        "escaped group DN");
+    return Task.CompletedTask;
 }
 
 static async Task WorkerStopWaitsForActiveRun()
@@ -265,22 +719,65 @@ static CmdbuildSnapshot NewCmdbSnapshot(string roleName)
     return snapshot;
 }
 
-static CmdbuildClient NewCmdbuildClient(SequenceHttpHandler handler, int retryAttempts)
+static CmdbuildClient NewCmdbuildClient(
+    SequenceHttpHandler handler,
+    int retryAttempts,
+    Action<CmdbuildOptions>? configure = null)
 {
+    var options = new CmdbuildOptions
+    {
+        BaseUrl = "http://cmdbuild.example.local/cmdbuild/services/rest/v3",
+        Username = "cmdbuild-sync",
+        Password = "secret",
+        RetryAttempts = retryAttempts,
+        RetryBaseDelayMs = 1,
+        RetryMaxDelayMs = 1,
+        RetryJitterPercent = 0
+    };
+    configure?.Invoke(options);
+
     return new CmdbuildClient(
         new HttpClient(handler),
-        Options.Create(new CmdbuildOptions
-        {
-            BaseUrl = "http://cmdbuild.example.local/cmdbuild/services/rest/v3",
-            Username = "cmdbuild-sync",
-            Password = "secret",
-            RetryAttempts = retryAttempts,
-            RetryBaseDelayMs = 1,
-            RetryMaxDelayMs = 1,
-            RetryJitterPercent = 0
-        }),
+        Options.Create(options),
         Options.Create(new DebugOptions()),
         NullLogger<CmdbuildClient>.Instance);
+}
+
+static AdGroupSynchronizationService NewSynchronizationService(
+    AdGroupSnapshot adSnapshot,
+    CmdbuildSnapshot cmdbSnapshot,
+    InMemoryStateStore stateStore,
+    SyncOptions syncOptions,
+    CmdbuildOptions? cmdbuildOptions = null)
+{
+    return NewSynchronizationServiceWithClient(
+        adSnapshot,
+        new FakeCmdbuildClient(cmdbSnapshot),
+        stateStore,
+        syncOptions,
+        cmdbuildOptions);
+}
+
+static AdGroupSynchronizationService NewSynchronizationServiceWithClient(
+    AdGroupSnapshot adSnapshot,
+    FakeCmdbuildClient cmdbuildClient,
+    InMemoryStateStore stateStore,
+    SyncOptions syncOptions,
+    CmdbuildOptions? cmdbuildOptions = null)
+{
+    return new AdGroupSynchronizationService(
+        new FakeActiveDirectoryClient(adSnapshot),
+        cmdbuildClient,
+        stateStore,
+        Options.Create(new ActiveDirectoryOptions
+        {
+            GroupNames = ["CMDBuildUsers"],
+            ProvisioningGroupName = "CMDBuildUsers"
+        }),
+        Options.Create(cmdbuildOptions ?? new CmdbuildOptions()),
+        Options.Create(syncOptions),
+        Options.Create(new DebugOptions()),
+        NullLogger<AdGroupSynchronizationService>.Instance);
 }
 
 static SyncOptions NewWorkerSyncOptions(string directory, int shutdownGracePeriodSeconds)
@@ -330,6 +827,190 @@ static AdGroupSyncWorker NewWorker(
         NullLogger<AdGroupSyncWorker>.Instance);
 }
 
+static HttpResponseMessage JsonResponse(string json, HttpStatusCode statusCode = HttpStatusCode.OK)
+{
+    return new HttpResponseMessage(statusCode)
+    {
+        Content = new StringContent(json, Encoding.UTF8, "application/json")
+    };
+}
+
+static IReadOnlyCollection<string> ReadRoleIds(JsonElement root)
+{
+    var values = new List<string>();
+    foreach (var item in root.GetProperty("userGroups").EnumerateArray())
+    {
+        if (!item.TryGetProperty("_id", out var id))
+        {
+            continue;
+        }
+
+        values.Add(id.ValueKind == JsonValueKind.Number ? id.GetRawText() : id.GetString() ?? "");
+    }
+
+    return values;
+}
+
+static Dictionary<string, string> NewServiceEnvironment(string environment, int port)
+{
+    return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ASPNETCORE_ENVIRONMENT"] = environment,
+        ["DOTNET_ENVIRONMENT"] = environment,
+        ["ASPNETCORE_URLS"] = $"http://127.0.0.1:{port}",
+        ["AllowedHosts"] = "127.0.0.1;localhost",
+        ["Secrets__Provider"] = "None",
+        ["ActiveDirectory__Host"] = "ad.example.local",
+        ["ActiveDirectory__Port"] = "636",
+        ["ActiveDirectory__UseSsl"] = "true",
+        ["ActiveDirectory__IgnoreCertificateErrors"] = "false",
+        ["ActiveDirectory__BindDn"] = "CN=svc-adgroups2cmdbuild,OU=Service Accounts,DC=example,DC=local",
+        ["ActiveDirectory__BindPassword"] = "secret",
+        ["ActiveDirectory__GroupSearchBaseDn"] = "OU=Groups,DC=example,DC=local",
+        ["ActiveDirectory__GroupNames__0"] = "CMDBuildUsers",
+        ["ActiveDirectory__ProvisioningGroupName"] = "CMDBuildUsers",
+        ["Cmdbuild__BaseUrl"] = "https://cmdbuild.example.local/cmdbuild/services/rest/v3",
+        ["Cmdbuild__Username"] = "cmdbuild-sync",
+        ["Cmdbuild__Password"] = "secret",
+        ["Sync__Enabled"] = "false",
+        ["Readiness__Enabled"] = "true",
+        ["Readiness__CheckDependencies"] = environment.Equals("Production", StringComparison.OrdinalIgnoreCase) ? "true" : "false",
+        ["Readiness__Route"] = "/ready",
+        ["Readiness__TimeoutMs"] = "200",
+        ["EndpointRateLimiting__Enabled"] = "false",
+        ["ElkLogging__Enabled"] = "false"
+    };
+}
+
+static int GetFreeTcpPort()
+{
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    try
+    {
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+    finally
+    {
+        listener.Stop();
+    }
+}
+
+static async Task WaitForHttpOkAsync(
+    ServiceProcessHandle service,
+    string url,
+    TimeSpan timeout,
+    string operation)
+{
+    using var httpClient = new HttpClient
+    {
+        Timeout = TimeSpan.FromMilliseconds(300)
+    };
+    var deadline = DateTimeOffset.UtcNow + timeout;
+    Exception? lastException = null;
+
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        if (service.Process.HasExited)
+        {
+            throw new InvalidOperationException($"{operation}: service exited early with code {service.Process.ExitCode}. Output:{Environment.NewLine}{service.Output}");
+        }
+
+        try
+        {
+            using var response = await httpClient.GetAsync(url);
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                return;
+            }
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            lastException = exception;
+        }
+
+        await Task.Delay(100);
+    }
+
+    throw new InvalidOperationException($"{operation} timed out. Last error: {lastException?.Message}. Output:{Environment.NewLine}{service.Output}");
+}
+
+static async Task<JsonDocument> GetServiceJsonAsync(string url)
+{
+    using var httpClient = new HttpClient
+    {
+        Timeout = TimeSpan.FromSeconds(2)
+    };
+    using var response = await httpClient.GetAsync(url);
+    response.EnsureSuccessStatusCode();
+    var text = await response.Content.ReadAsStringAsync();
+    return JsonDocument.Parse(text);
+}
+
+static string FindRepoRoot()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null)
+    {
+        if (File.Exists(Path.Combine(directory.FullName, "scripts", "bootstrap-ad-groups.sh")))
+        {
+            return directory.FullName;
+        }
+
+        directory = directory.Parent;
+    }
+
+    throw new InvalidOperationException("repo root was not found");
+}
+
+static async Task<ProcessResult> RunProcessAsync(
+    string fileName,
+    string arguments,
+    string workingDirectory,
+    TimeSpan timeout)
+{
+    using var process = new Process();
+    var output = new StringBuilder();
+    process.StartInfo = new ProcessStartInfo(fileName, arguments)
+    {
+        WorkingDirectory = workingDirectory,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+    process.OutputDataReceived += (_, args) =>
+    {
+        if (args.Data is not null)
+        {
+            output.AppendLine(args.Data);
+        }
+    };
+    process.ErrorDataReceived += (_, args) =>
+    {
+        if (args.Data is not null)
+        {
+            output.AppendLine(args.Data);
+        }
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    process.BeginErrorReadLine();
+    using var cancellation = new CancellationTokenSource(timeout);
+    try
+    {
+        await process.WaitForExitAsync(cancellation.Token);
+        process.WaitForExit();
+    }
+    catch (OperationCanceledException)
+    {
+        process.Kill(entireProcessTree: true);
+        throw new InvalidOperationException($"{fileName} {arguments} timed out. Output:{Environment.NewLine}{output}");
+    }
+
+    return new ProcessResult(process.ExitCode, output.ToString());
+}
+
 static async Task WaitAsync(Task task, TimeSpan timeout, string operation)
 {
     using var timeoutCancellation = new CancellationTokenSource(timeout);
@@ -340,6 +1021,76 @@ static async Task WaitAsync(Task task, TimeSpan timeout, string operation)
     catch (OperationCanceledException)
     {
         throw new InvalidOperationException($"{operation} timed out");
+    }
+}
+
+static async Task AssertThrowsAsync<TException>(Func<Task> action, string expectedMessage)
+    where TException : Exception
+{
+    try
+    {
+        await action();
+    }
+    catch (TException exception)
+    {
+        AssertTextContains(exception.Message, expectedMessage, typeof(TException).Name);
+        return;
+    }
+
+    throw new InvalidOperationException($"expected exception {typeof(TException).Name}");
+}
+
+static void AssertThrows<TException>(Action action, string expectedMessage)
+    where TException : Exception
+{
+    try
+    {
+        action();
+    }
+    catch (TException exception)
+    {
+        AssertTextContains(exception.Message, expectedMessage, typeof(TException).Name);
+        return;
+    }
+
+    throw new InvalidOperationException($"expected exception {typeof(TException).Name}");
+}
+
+static void AssertPathResponse(JsonElement paths, string path, string statusCode)
+{
+    AssertTrue(paths.TryGetProperty(path, out var pathItem), $"OpenAPI path {path} should exist");
+    AssertTrue(pathItem.TryGetProperty("get", out var get), $"OpenAPI path {path} should define GET");
+    var responses = get.GetProperty("responses");
+    AssertTrue(responses.TryGetProperty(statusCode, out _), $"OpenAPI path {path} should define response {statusCode}");
+}
+
+static void AssertRequiredProperties(JsonElement schema, IReadOnlyCollection<string> expectedProperties, string schemaName)
+{
+    var required = schema.GetProperty("required")
+        .EnumerateArray()
+        .Select(item => item.GetString())
+        .Where(item => !string.IsNullOrWhiteSpace(item))
+        .ToHashSet(StringComparer.Ordinal);
+
+    foreach (var property in expectedProperties)
+    {
+        AssertTrue(required.Contains(property), $"{schemaName} should require {property}");
+    }
+}
+
+static void AssertSequenceEqual<T>(IReadOnlyList<T> expected, IReadOnlyList<T> actual, string name)
+{
+    if (expected.Count != actual.Count)
+    {
+        throw new InvalidOperationException($"{name}: expected {expected.Count} item(s), got {actual.Count}");
+    }
+
+    for (var index = 0; index < expected.Count; index++)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected[index], actual[index]))
+        {
+            throw new InvalidOperationException($"{name}: item {index} expected {expected[index]}, got {actual[index]}");
+        }
     }
 }
 
@@ -356,6 +1107,14 @@ static void AssertTrue(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+static void AssertTextContains(string value, string expected, string name)
+{
+    if (!value.Contains(expected, StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException($"{name}: expected text to contain '{expected}', got '{value}'");
     }
 }
 
@@ -419,6 +1178,14 @@ internal sealed class FakeCmdbuildClient(CmdbuildSnapshot snapshot) : ICmdbuildC
 
     public List<string> CreatedLogins { get; } = [];
 
+    public List<string> UpdatedLogins { get; } = [];
+
+    public List<string> DisabledLogins { get; } = [];
+
+    public List<UserUpsertRequest> CreateRequests { get; } = [];
+
+    public List<UserUpsertRequest> UpdateRequests { get; } = [];
+
     public Task<CmdbuildSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
     {
         return Task.FromResult(snapshot);
@@ -437,16 +1204,20 @@ internal sealed class FakeCmdbuildClient(CmdbuildSnapshot snapshot) : ICmdbuildC
         }
 
         CreatedLogins.Add(request.Login);
+        CreateRequests.Add(request);
         return Task.CompletedTask;
     }
 
     public Task UpdateUserAsync(CmdbuildUser existingUser, UserUpsertRequest request, CancellationToken cancellationToken)
     {
+        UpdatedLogins.Add(request.Login);
+        UpdateRequests.Add(request);
         return Task.CompletedTask;
     }
 
     public Task DisableUserAsync(CmdbuildUser existingUser, CancellationToken cancellationToken)
     {
+        DisabledLogins.Add(existingUser.Username);
         return Task.CompletedTask;
     }
 }
@@ -457,6 +1228,8 @@ internal sealed class InMemoryStateStore : ISyncStateStore
 
     public SyncState SavedState { get; private set; } = new();
 
+    public int SaveCount { get; private set; }
+
     public Task<SyncState> LoadAsync(CancellationToken cancellationToken)
     {
         return Task.FromResult(State);
@@ -464,6 +1237,7 @@ internal sealed class InMemoryStateStore : ISyncStateStore
 
     public Task SaveAsync(SyncState state, CancellationToken cancellationToken)
     {
+        SaveCount++;
         SavedState = new SyncState();
         foreach (var login in state.ManagedLogins)
         {
@@ -480,11 +1254,168 @@ internal sealed class SequenceHttpHandler(params Func<HttpRequestMessage, HttpRe
 
     public int RequestCount { get; private set; }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    public List<CapturedRequest> CapturedRequests { get; } = [];
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         RequestCount++;
+        var body = request.Content is null
+            ? null
+            : await request.Content.ReadAsStringAsync(cancellationToken);
+        CapturedRequests.Add(new CapturedRequest(
+            request.Method.Method,
+            request.RequestUri?.ToString() ?? "",
+            request.Headers.Authorization?.Scheme,
+            request.Headers.Authorization?.Parameter,
+            request.Headers.TryGetValues("CMDBuild-View", out var view) ? view.FirstOrDefault() : null,
+            body));
+
         var responseIndex = Math.Min(index, responses.Length - 1);
         index++;
-        return Task.FromResult(responses[responseIndex](request));
+        return responses[responseIndex](request);
     }
 }
+
+internal sealed class ServiceProcessHandle : IAsyncDisposable
+{
+    private readonly StringBuilder output = new();
+    private readonly object outputGate = new();
+
+    private ServiceProcessHandle(Process process)
+    {
+        Process = process;
+    }
+
+    public Process Process { get; }
+
+    public string Output
+    {
+        get
+        {
+            lock (outputGate)
+            {
+                return output.ToString();
+            }
+        }
+    }
+
+    public static ServiceProcessHandle Start(IReadOnlyDictionary<string, string> environment)
+    {
+        var startInfo = BuildStartInfo(environment);
+        var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+        var handle = new ServiceProcessHandle(process);
+        process.OutputDataReceived += (_, args) => handle.AppendOutput(args.Data);
+        process.ErrorDataReceived += (_, args) => handle.AppendOutput(args.Data);
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        return handle;
+    }
+
+    public async Task WaitForExitAsync(TimeSpan timeout, string operation)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await Process.WaitForExitAsync(cancellation.Token);
+            Process.WaitForExit();
+        }
+        catch (OperationCanceledException)
+        {
+            await DisposeAsync();
+            throw new InvalidOperationException($"{operation}: service did not exit within {timeout.TotalSeconds:0.#}s. Output:{Environment.NewLine}{Output}");
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!Process.HasExited)
+        {
+            Process.Kill(entireProcessTree: true);
+        }
+
+        try
+        {
+            await Process.WaitForExitAsync();
+            Process.WaitForExit();
+        }
+        catch (InvalidOperationException)
+        {
+            // Process may already be gone between HasExited and Kill/WaitForExit.
+        }
+        finally
+        {
+            Process.Dispose();
+        }
+    }
+
+    private static ProcessStartInfo BuildStartInfo(IReadOnlyDictionary<string, string> environment)
+    {
+        var appHostName = OperatingSystem.IsWindows() ? "adgroups2cmdbuild.exe" : "adgroups2cmdbuild";
+        var appHostPath = Path.Combine(AppContext.BaseDirectory, appHostName);
+        var dllPath = Path.Combine(AppContext.BaseDirectory, "adgroups2cmdbuild.dll");
+        var startInfo = File.Exists(appHostPath)
+            ? new ProcessStartInfo(appHostPath)
+            : new ProcessStartInfo(FindDotnetHost(), $"\"{dllPath}\"");
+
+        startInfo.WorkingDirectory = AppContext.BaseDirectory;
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
+        startInfo.UseShellExecute = false;
+        foreach (var item in environment)
+        {
+            startInfo.Environment[item.Key] = item.Value;
+        }
+
+        return startInfo;
+    }
+
+    private static string FindDotnetHost()
+    {
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (!string.IsNullOrWhiteSpace(dotnetRoot))
+        {
+            var candidate = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(Environment.ProcessPath)
+            && Path.GetFileNameWithoutExtension(Environment.ProcessPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            return Environment.ProcessPath;
+        }
+
+        return OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+    }
+
+    private void AppendOutput(string? value)
+    {
+        if (value is null)
+        {
+            return;
+        }
+
+        lock (outputGate)
+        {
+            output.AppendLine(value);
+        }
+    }
+}
+
+internal sealed record CapturedRequest(
+    string Method,
+    string Uri,
+    string? AuthorizationScheme,
+    string? AuthorizationParameter,
+    string? CmdbuildView,
+    string? Body);
+
+internal sealed record ProcessResult(int ExitCode, string Output);

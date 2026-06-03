@@ -1,0 +1,252 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "adgroups2cmdbuild operational API",
+    "version": "0.3.0",
+    "description": "Machine-readable contract for health, readiness and synchronization status endpoints."
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness and current synchronization status",
+        "responses": {
+          "200": {
+            "description": "Service process is running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness check",
+        "responses": {
+          "200": {
+            "description": "Service is ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service dependencies are not ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sync/status": {
+      "get": {
+        "summary": "Detailed status of the latest synchronization run",
+        "responses": {
+          "200": {
+            "description": "Current synchronization status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "service",
+          "status",
+          "sync"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "const": "ok"
+          },
+          "sync": {
+            "$ref": "#/components/schemas/SyncStatus"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ReadinessResponse": {
+        "type": "object",
+        "required": [
+          "service",
+          "status",
+          "dependenciesChecked"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
+          },
+          "dependenciesChecked": {
+            "type": "boolean"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DependencyCheck"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "DependencyCheck": {
+        "type": "object",
+        "required": [
+          "name",
+          "ok"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SyncStatus": {
+        "type": "object",
+        "required": [
+          "isRunning",
+          "lastStartedUtc",
+          "lastCompletedUtc",
+          "lastSucceeded",
+          "lastError",
+          "lastSummary"
+        ],
+        "properties": {
+          "isRunning": {
+            "type": "boolean"
+          },
+          "lastStartedUtc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lastCompletedUtc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lastSucceeded": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastSummary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SyncRunSummary": {
+        "type": "object",
+        "required": [
+          "adUsers",
+          "provisionedUsers",
+          "createdUsers",
+          "updatedUsers",
+          "disabledUsers",
+          "skippedUsers",
+          "failedUsers",
+          "dryRun",
+          "hasFailures"
+        ],
+        "properties": {
+          "adUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "provisionedUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "createdUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updatedUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "disabledUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skippedUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failedUsers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "hasFailures": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

@@ -41,12 +41,15 @@ docker run --rm \
   -e Cmdbuild__Username=cmdbuild-admin \
   -e Cmdbuild__PasswordSecret='AAA.LOCAL/PROD/cmdbuild-admin' \
   -e Sync__DryRun=false \
+  -e Readiness__CheckDependencies=true \
   -e AllowedHosts=adgroups2cmdbuild.example.local \
   adgroups2cmdbuild:dev
 ```
 
 Контейнерный image содержит Docker `HEALTHCHECK`, который вызывает `http://localhost:8080/health`.
-Для production обязательно задайте HTTPS `Cmdbuild__BaseUrl`, явный `AllowedHosts` и не включайте `ActiveDirectory__IgnoreCertificateErrors`.
+Runtime запускается от non-root пользователя `ad2cmdb` с UID/GID `64100`.
+Если `state/` монтируется с host, каталог должен быть writable для UID/GID `64100` или предварительно создан с совместимыми правами.
+Для production обязательно задайте `ActiveDirectory__UseSsl=true`, HTTPS `Cmdbuild__BaseUrl`, `Readiness__CheckDependencies=true`, явный `AllowedHosts` и не включайте `ActiveDirectory__IgnoreCertificateErrors`.
 При остановке контейнера worker прекращает новые sync-run и ждет активный run до `Sync__ShutdownGracePeriodSeconds`, затем отменяет его.
 
 ## Deployment Order
@@ -70,6 +73,8 @@ curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
 
+Машиночитаемый contract этих endpoint-ов: `aa/contracts/operational-api.openapi.json`.
+
 Build gates:
 
 ```bash
@@ -78,6 +83,7 @@ Build gates:
 ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
 bash -n scripts/dotnet
 bash -n scripts/bootstrap-ad-groups.sh
+./scripts/bootstrap-ad-groups.sh --help
 git diff --check
 ```
 

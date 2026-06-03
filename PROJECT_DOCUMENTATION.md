@@ -1,7 +1,7 @@
 # Документация проекта ad2cmdb
 
-Версия документации: `0.2.0`.
-Дата актуализации: 2026-06-01.
+Версия документации: `0.3.0`.
+Дата актуализации: 2026-06-03.
 
 ## Назначение
 
@@ -20,6 +20,7 @@ CMDBuild является целевой системой.
 | `tools/bootstrap-ad-groups` | Консольный deployment tool для создания AD-групп по CMDBuild roles |
 | `deploy/dockerfiles/adgroups2cmdbuild.Dockerfile` | Docker image сервиса |
 | `aa/` | Архитектурные артефакты, карты конфигурации, health, secrets и observability |
+| `aa/contracts/operational-api.openapi.json` | Машиночитаемый OpenAPI contract для `/health`, `/ready`, `/sync/status` |
 | `tests/adgroups2cmdbuild.tests` | Легкий test harness без внешних NuGet test packages |
 | `state/` | Runtime state, не коммитится |
 
@@ -31,6 +32,7 @@ CMDBuild является целевой системой.
 - Missing AD group или CMDBuild role останавливает sync-run до любых изменений.
 - Ошибка CMDBuild по одному пользователю не останавливает batch: остальные пользователи продолжают обрабатываться, а `/sync/status` показывает partial failure.
 - LDAP/LDAPS операции AD и REST-запросы CMDBuild повторяются только при transient ошибках с exponential backoff и jitter.
+- `bootstrap-ad-groups` использует такой же bounded retry/backoff для transient CMDBuild role reads и LDAP bind/search/create операций.
 - При остановке сервиса новые sync-run не запускаются; активный run получает до `Sync:ShutdownGracePeriodSeconds` на штатное завершение.
 - State сохраняется только после apply и только для успешно примененных операций.
 - `Sync:DryRun=true` ничего не пишет в CMDBuild и не сохраняет state.
@@ -48,6 +50,9 @@ State-файл:
 - backup: `state/adgroups2cmdbuild-state.json.bak`;
 - lock: `state/adgroups2cmdbuild.lock`.
 
+Docker image запускает сервис от non-root пользователя `ad2cmdb` с UID/GID `64100`.
+Mounted state volume должен быть writable для этого пользователя.
+
 Если основной state поврежден, сервис пробует backup.
 Если повреждены оба файла, sync-run завершается ошибкой и требует ручного восстановления.
 
@@ -62,12 +67,15 @@ State-файл:
 Поля partial failure отражаются в `lastSummary.failedUsers`, а `lastSucceeded=false` означает, что последний run завершился с ошибкой или частичными ошибками.
 
 Для `/health`, `/ready` и `/sync/status` включен fixed-window rate limit через `EndpointRateLimiting`.
+Машиночитаемый contract endpoint-ов находится в `aa/contracts/operational-api.openapi.json`.
 
 ## Security Baseline
 
+- В `Production` `ActiveDirectory:UseSsl` должен быть `true`, потому что LDAP simple bind передает учетные данные.
 - В `Production` запрещен `ActiveDirectory:IgnoreCertificateErrors=true`.
 - В `Production` `Cmdbuild:BaseUrl` должен использовать HTTPS.
 - В `Production` `AllowedHosts` не должен быть `*`; задавайте явные DNS names через env/config.
+- В `Production` `Readiness:CheckDependencies=true` обязателен, чтобы `/ready` проверял AD и CMDBuild.
 - Секреты задаются через env, `appsettings.Production.json` вне git или PAM/AAPM references.
 - `Debug:Level=Verbose` по умолчанию редактирует sensitive login values; реальные значения включаются только через `Debug:LogSensitiveValues=true`.
 
@@ -88,6 +96,7 @@ bash -n scripts/bootstrap-ad-groups.sh
 ./scripts/dotnet build src/adgroups2cmdbuild/adgroups2cmdbuild.csproj -v minimal
 ./scripts/dotnet build tools/bootstrap-ad-groups/bootstrap-ad-groups.csproj -v minimal
 ./scripts/dotnet run --project tests/adgroups2cmdbuild.tests/adgroups2cmdbuild.tests.csproj
+./scripts/bootstrap-ad-groups.sh --help
 git diff --check
 ```
 

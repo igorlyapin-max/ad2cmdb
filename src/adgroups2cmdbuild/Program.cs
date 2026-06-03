@@ -16,9 +16,9 @@ var rateLimitSettings = builder.Configuration
     .GetSection(EndpointRateLimitOptions.SectionName)
     .Get<EndpointRateLimitOptions>() ?? new EndpointRateLimitOptions();
 
-if (isProduction && string.Equals(builder.Configuration["AllowedHosts"]?.Trim(), "*", StringComparison.Ordinal))
+if (isProduction && ProductionGuards.HasWildcardAllowedHost(builder.Configuration["AllowedHosts"]))
 {
-    throw new InvalidOperationException("AllowedHosts must not be '*' in Production. Configure explicit host names.");
+    throw new InvalidOperationException("AllowedHosts must not contain '*' in Production. Configure explicit host names.");
 }
 
 builder.Services.AddOptions<ServiceOptions>()
@@ -46,14 +46,15 @@ builder.Services.AddOptions<ActiveDirectoryOptions>()
     .Validate(options => options.RetryBaseDelayMs > 0, "ActiveDirectory:RetryBaseDelayMs must be greater than zero.")
     .Validate(options => options.RetryMaxDelayMs >= options.RetryBaseDelayMs, "ActiveDirectory:RetryMaxDelayMs must be greater than or equal to RetryBaseDelayMs.")
     .Validate(options => options.RetryJitterPercent is >= 0 and <= 100, "ActiveDirectory:RetryJitterPercent must be between 0 and 100.")
-    .Validate(options => !(isProduction && options.UseSsl && options.IgnoreCertificateErrors), "ActiveDirectory:IgnoreCertificateErrors is not allowed in Production.")
+    .Validate(options => !isProduction || ProductionGuards.ActiveDirectoryUsesSecureTransport(options.UseSsl), "ActiveDirectory:UseSsl must be true in Production because LDAP simple bind sends credentials.")
+    .Validate(options => !isProduction || !ProductionGuards.AllowsActiveDirectoryCertificateBypass(options.IgnoreCertificateErrors), "ActiveDirectory:IgnoreCertificateErrors is not allowed in Production.")
     .ValidateOnStart();
 
 builder.Services.AddOptions<CmdbuildOptions>()
     .Bind(builder.Configuration.GetSection(CmdbuildOptions.SectionName))
     .Validate(options => !string.IsNullOrWhiteSpace(options.BaseUrl), "Cmdbuild:BaseUrl is required.")
     .Validate(options => Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out _), "Cmdbuild:BaseUrl must be an absolute URL.")
-    .Validate(options => !isProduction || Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps, "Cmdbuild:BaseUrl must use https in Production.")
+    .Validate(options => !isProduction || ProductionGuards.CmdbuildBaseUrlUsesHttps(options.BaseUrl), "Cmdbuild:BaseUrl must use https in Production.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.Username), "Cmdbuild:Username is required.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.Password), "Cmdbuild:Password is required.")
     .Validate(options => options.RequestTimeoutMs > 0, "Cmdbuild:RequestTimeoutMs must be greater than zero.")
@@ -87,6 +88,7 @@ builder.Services.AddOptions<ReadinessOptions>()
     .Validate(options => !string.IsNullOrWhiteSpace(options.Route), "Readiness:Route is required.")
     .Validate(options => options.Route.StartsWith('/'), "Readiness:Route must start with '/'.")
     .Validate(options => options.TimeoutMs > 0, "Readiness:TimeoutMs must be greater than zero.")
+    .Validate(options => !isProduction || ProductionGuards.ReadinessChecksDependencies(options.Enabled, options.CheckDependencies), "Readiness:Enabled and Readiness:CheckDependencies must be true in Production.")
     .ValidateOnStart();
 
 builder.Services.AddOptions<EndpointRateLimitOptions>()

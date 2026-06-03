@@ -14,6 +14,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../../src/adgroups2cmdbuild/Configuration/ProductionGuards.cs" Link="Configuration/%(Filename)%(Extension)" />
+    <Compile Include="../../src/adgroups2cmdbuild/Resilience/RetryBackoff.cs" Link="Resilience/%(Filename)%(Extension)" />
     <Compile Include="../../src/adgroups2cmdbuild/Secrets/*.cs" Link="Secrets/%(Filename)%(Extension)" />
   </ItemGroup>
 

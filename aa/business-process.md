@@ -36,6 +36,7 @@
 - Локальный lock-файл `Sync:InstanceLockPath` защищает от двух sync-run на одном хосте.
 - Ошибки отправки ELK logs не ломают sync.
 - PAM/AAPM `secret://...` без активного provider считается конфигурационной ошибкой.
+- В production сервис требует LDAPS, HTTPS CMDBuild, dependency readiness и явный `AllowedHosts` без wildcard.
 
 Остановка:
 
@@ -80,6 +81,7 @@
 - `--apply` без явного selection запрещен, кроме случая `BootstrapAdGroups:RequireExplicitSelectionForApply=false`;
 - существующие AD groups не пересоздаются и не изменяются;
 - членство пользователей не переносится, создаются только group objects.
+- в production tool требует LDAPS, HTTPS CMDBuild и запрещает bypass проверки LDAP-сертификата.
 
 ## BP-004. Диагностика и Логирование
 

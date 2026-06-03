@@ -10,8 +10,10 @@
 | --- | --- |
 | [business-process.md](business-process.md) | Бизнес-процессы синхронизации, блокировки и bootstrap AD-групп |
 | [configuration-files.md](configuration-files.md) | Карта конфигурационных файлов, env overrides и state |
+| [contracts/operational-api.openapi.json](contracts/operational-api.openapi.json) | OpenAPI contract для `/health`, `/ready`, `/sync/status` |
 | [deployment.md](deployment.md) | Развертывание сервиса, Docker, ports, smoke и rollback |
 | [information-model.md](information-model.md) | Информационные сущности, ключи и правила владения данными |
+| [modernization-backlog.md](modernization-backlog.md) | Текущий modernization baseline, закрытые P1 gaps и backlog |
 | [maps/access-map.md](maps/access-map.md) | Внешние подключения и минимальные права |
 | [maps/healthcheck-map.md](maps/healthcheck-map.md) | Health/status endpoints и операционные проверки |
 | [maps/observability-map.md](maps/observability-map.md) | Console, ELK, Docker syslog и debug-level logging |
@@ -50,4 +52,5 @@ flowchart LR
 - По умолчанию опасные действия выключены: sync работает в `DryRun=true`, bootstrap tool работает без `--apply`.
 - Секреты не хранятся в git: используются env, mounted config или PAM/AAPM `secret://...`.
 - Transient ошибки AD/CMDBuild повторяются с bounded exponential backoff и jitter.
+- Health/readiness/status API имеет машинный OpenAPI contract для contract tests и внешней документации.
 - При остановке сервиса активный sync-run завершается штатно в пределах `Sync:ShutdownGracePeriodSeconds` либо отменяется с фиксацией ошибки в status.

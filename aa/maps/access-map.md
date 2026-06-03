@@ -4,13 +4,13 @@
 
 | ID | Откуда | Куда | Protocol | Port | Назначение |
 | --- | --- | --- | --- | --- | --- |
-| ACC-001 | `adgroups2cmdbuild` | MS AD DC | LDAP | `389` | Чтение AD groups/users, если `UseSsl=false` |
-| ACC-002 | `adgroups2cmdbuild` | MS AD DC | LDAPS | `636` | Чтение AD groups/users, если `UseSsl=true` |
+| ACC-001 | `adgroups2cmdbuild` | MS AD DC | LDAP | `389` | Только local/dev чтение AD groups/users, если `UseSsl=false` |
+| ACC-002 | `adgroups2cmdbuild` | MS AD DC | LDAPS | `636` | Production чтение AD groups/users; `UseSsl=true` обязателен |
 | ACC-003 | `adgroups2cmdbuild` | CMDBuild | HTTP/HTTPS REST v3 | deployment-specific | Чтение roles/users, create/update/disable users |
 | ACC-004 | `adgroups2cmdbuild` | Indeed PAM/AAPM | HTTPS | `443` | Получение секретов по `secret://...` |
 | ACC-005 | `adgroups2cmdbuild` | ELK / Elasticsearch | HTTPS | deployment-specific | Optional structured logs |
 | ACC-006 | `bootstrap-ad-groups` | CMDBuild | HTTP/HTTPS REST v3 | deployment-specific | Чтение CMDBuild roles |
-| ACC-007 | `bootstrap-ad-groups` | MS AD DC | LDAP/LDAPS | `389`/`636` | Поиск и создание AD groups |
+| ACC-007 | `bootstrap-ad-groups` | MS AD DC | LDAP/LDAPS | `389`/`636` | Поиск и создание AD groups; в production обязателен LDAPS |
 | ACC-008 | Docker daemon | Syslog receiver | UDP/TCP/TLS | `514`/`6514` | Optional forwarding stdout/stderr через Docker syslog logging driver |
 
 ## Минимальные Права

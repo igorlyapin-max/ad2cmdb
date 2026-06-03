@@ -10,6 +10,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/adgroups2cmdbuild/adgroups2cmdbuild.csproj" />
+    <Compile Include="../../tools/bootstrap-ad-groups/BootstrapAdGroupsLogic.cs" Link="BootstrapAdGroupsLogic.cs" />
   </ItemGroup>
 
 </Project>

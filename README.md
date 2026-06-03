@@ -4,6 +4,7 @@
 
 Architecture artifacts are stored in [aa/](aa/README.md).
 Russian deployment instructions are in [DEPLOYMENT.md](DEPLOYMENT.md).
+The machine-readable operational API contract is [aa/contracts/operational-api.openapi.json](aa/contracts/operational-api.openapi.json).
 
 Behavior:
 - every configured AD group is expected to have the same name as a CMDBuild role;
@@ -50,9 +51,11 @@ Sync__DryRun=false
 Sync__IntervalSeconds=300
 Sync__FailureBackoffSeconds=30
 Sync__ShutdownGracePeriodSeconds=60
+Readiness__CheckDependencies=true
+AllowedHosts=adgroups2cmdbuild.example.local
 ```
 
-In `Production`, `Cmdbuild:BaseUrl` must use HTTPS, `AllowedHosts` must not be `*`, and `ActiveDirectory:IgnoreCertificateErrors=true` is rejected.
+In `Production`, `ActiveDirectory:UseSsl` must be `true`, `ActiveDirectory:IgnoreCertificateErrors=true` is rejected, `Cmdbuild:BaseUrl` must use HTTPS, `Readiness:CheckDependencies` must be `true`, and `AllowedHosts` must not contain `*`.
 For production containers set `AllowedHosts` to the external DNS names accepted by the service.
 
 Secrets can be stored as plain env/config values for development or as PAM/AAPM references:
@@ -88,6 +91,7 @@ AD LDAP/LDAPS operations and CMDBuild REST calls use exponential backoff with op
 AD retry covers bind/search/range reads for transient LDAP/network failures such as timeout, server down, busy, or unavailable.
 CMDBuild retry covers HTTP `408`, `429`, `5xx`, timeout, and network failures.
 Authentication, authorization, invalid DN/filter, and other permanent errors are not retried.
+The `bootstrap-ad-groups` tool uses the same retry settings for CMDBuild role reads and LDAP bind/search/create operations.
 
 On SIGTERM/SIGINT the worker stops scheduling new runs.
 If a sync run is active, it waits up to `Sync:ShutdownGracePeriodSeconds` for normal completion.
@@ -142,7 +146,8 @@ curl http://localhost:5084/ready
 curl http://localhost:5084/sync/status
 ```
 
-`/health`, `/ready`, and `/sync/status` use the `EndpointRateLimiting` fixed-window limit. `/ready` is shallow by default; set `Readiness__CheckDependencies=true` to make it check LDAP bind and a lightweight CMDBuild REST call.
+`/health`, `/ready`, and `/sync/status` use the `EndpointRateLimiting` fixed-window limit. `/ready` is shallow by default for development; in `Production`, set `Readiness__CheckDependencies=true` so it checks LDAP bind and a lightweight CMDBuild REST call.
+Their OpenAPI contract is stored in `aa/contracts/operational-api.openapi.json`.
 
 If a single CMDBuild user operation fails, the sync run continues with the remaining users. `/sync/status` reports `lastSucceeded=false` and `lastSummary.failedUsers` when a run completed with partial failures.
 
@@ -151,6 +156,8 @@ Docker build:
 ```bash
 docker build -f deploy/dockerfiles/adgroups2cmdbuild.Dockerfile -t adgroups2cmdbuild:dev .
 ```
+
+The runtime image runs as non-root user `ad2cmdb` with UID/GID `64100`; mounted `state/` volumes must be writable for that UID/GID.
 
 ## Bootstrap AD Groups
 
@@ -177,6 +184,7 @@ Selection options:
 
 The tool refuses `--apply` without explicit selection unless `BootstrapAdGroups:RequireExplicitSelectionForApply=false`.
 It uses the same AD, CMDBuild, env override, and PAM/AAPM settings as the service.
+It also uses the same AD/CMDBuild retry knobs for transient network, LDAP, and HTTP failures.
 
 ## CMDBuild Contract
 

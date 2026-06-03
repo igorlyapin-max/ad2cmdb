@@ -245,7 +245,7 @@ public sealed class ActiveDirectoryClient(
         {
             logger.LogInformation(
                 "Debug Verbose: resolved AD user {Login}; displayNamePresent={DisplayNamePresent}; emailPresent={EmailPresent}",
-                user.Login,
+                debugOptions.Value.FormatSensitive(user.Login),
                 !string.IsNullOrWhiteSpace(user.DisplayName),
                 !string.IsNullOrWhiteSpace(user.Email));
         }
